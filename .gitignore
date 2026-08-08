@@ -1,6 +1,23 @@
 # Rust / Tauri build output
-/src-tauri/target/
-/src-tauri/gen/schemas/
+target/
+**/target/
+src-tauri/gen/
 
-# Bundled artifacts (regenerate via `cargo tauri build`)
-/dist/
+# Release artifacts are better attached to a release than committed to source
+dist/
+
+# JavaScript dependencies (the current project has none)
+node_modules/
+
+# Local configuration and secrets
+.env
+.env.*
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
