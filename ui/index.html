@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Stillwrite</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="shell" id="shell" data-mode="split">
+      <header class="toolbar">
+        <div class="toolbar-left">
+          <button
+            class="icon-btn"
+            id="toggleSidebar"
+            title="显示/隐藏文件栏 (Ctrl+B)"
+          >
+            ☰
+          </button>
+          <button class="text-btn" id="openFolder">打开文件夹</button>
+          <button class="icon-btn" id="newFile" title="新建 Markdown (Ctrl+N)">
+            ＋
+          </button>
+          <button
+            class="text-btn"
+            id="syncButton"
+            title="git 同步到远端 (radxa)，首次手动同步后自动保存会跟随同步"
+          >
+            ⟳ 同步
+          </button>
+          <div class="workspace-name" id="workspaceName">未打开文件夹</div>
+        </div>
+        <div class="toolbar-center" id="documentTitle">Stillwrite</div>
+        <div class="toolbar-right">
+          <span class="sync-state" id="syncState" hidden></span>
+          <span class="save-state" id="saveState">就绪</span>
+          <div class="segmented" aria-label="视图模式">
+            <button data-view="editor" title="仅写作 (Ctrl+1)">写</button>
+            <button class="active" data-view="split" title="双栏 (Ctrl+2)">
+              双
+            </button>
+            <button data-view="reader" title="仅阅读 (Ctrl+3)">读</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="sidebar" id="sidebar">
+          <div class="sidebar-head">
+            <span>文件</span>
+            <button class="icon-btn subtle" id="refreshTree" title="刷新目录">
+              ↻
+            </button>
+          </div>
+          <div class="search-box">
+            <input
+              id="searchInput"
+              type="search"
+              placeholder="搜索全文（FTS）…"
+              autocomplete="off"
+            />
+          </div>
+          <div class="tree" id="tree">
+            <div class="empty-tip">打开一个 Markdown 文件夹</div>
+          </div>
+        </aside>
+        <div
+          class="resize-handle sidebar-handle"
+          id="sidebarHandle"
+          title="拖动调整文件栏"
+        ></div>
+
+        <section class="panes" id="panes">
+          <section class="pane editor-pane" id="editorPane">
+            <div class="pane-label">WRITE</div>
+            <textarea
+              id="editor"
+              spellcheck="true"
+              autocomplete="off"
+              aria-label="Markdown 写作区"
+              placeholder="开始写作…"
+            ></textarea>
+          </section>
+          <div
+            class="resize-handle pane-handle"
+            id="paneHandle"
+            title="拖动调整写作/阅读比例"
+          ></div>
+          <section class="pane reader-pane" id="readerPane">
+            <div class="pane-label">READ</div>
+            <article class="markdown-body" id="preview">
+              <div class="welcome">
+                <h1>Stillwrite</h1>
+                <p>打开一个文件夹，选择左侧 Markdown 文件开始写作。</p>
+                <p>
+                  <kbd>Ctrl+1</kbd> 写作 · <kbd>Ctrl+2</kbd> 双栏 ·
+                  <kbd>Ctrl+3</kbd> 阅读
+                </p>
+              </div>
+            </article>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="newFileDialog" class="modal">
+      <form method="dialog" id="newFileForm">
+        <h3>新建 Markdown</h3>
+        <label for="newFileName">文件名</label>
+        <input id="newFileName" value="untitled.md" autocomplete="off" />
+        <p class="modal-help">可包含子目录，例如 <code>notes/idea.md</code></p>
+        <div class="modal-actions">
+          <button type="button" value="cancel" class="text-btn">取消</button>
+          <button value="default" class="primary-btn" id="createFileButton">
+            创建
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
