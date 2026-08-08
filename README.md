@@ -14,6 +14,37 @@
 - 记住上次目录、侧栏宽度、双栏比例和视图模式。
 - 不使用数据库、账号、云同步、React、Vite、Node 服务或 localhost。
 
+## v0.2 原型：全文搜索 + git 同步（本分支新增）
+
+**文件仍是唯一内容源**。SQLite 只是本地侧车索引，可随时删除重建；同步走 git（最后写入者胜）。
+
+### 全文搜索
+
+- 侧栏顶部搜索框，FTS5 全文索引（标题 + 正文）。
+- 打开工作区 / 保存 / 同步后自动增量索引。
+- 索引存放于应用数据目录（`~/.local/share/com.stillevo.stillwrite/workspaces/<hash>/index.db`），不进入工作区、不参与 git。
+
+### git 同步（最后写入者胜）
+
+- 工具栏 `⟳ 同步`：自动 `commit → fetch → merge → push`。
+- 冲突时按 **merge 前的工作区 mtime 与远端提交时间** 逐文件裁决，较新者胜。
+- 首次手动同步成功后，自动保存（含 `Ctrl+S`）4 秒后自动同步。
+- 同步使用**独立 `sync` remote**，绝不改写工作区已有的 `origin`（例如工作区若关联了 GitHub，两套 remote 互不干扰）。
+- 需要系统装有 `git` 并配置过身份（`git config --global user.name / user.email`）。
+
+#### 在 radxa 板子上建同步仓库（一次性）
+
+```bash
+# 板子上：
+git init --bare ~/stillwrite.git
+git symbolic-ref HEAD refs/heads/main   # 保证 HEAD 指向 main
+
+# 本机：验证 SSH 免密（可选，方便测试）
+ssh radxa@192.168.100.106 "git --version"
+```
+
+首次在工作区点 `⟳ 同步` 时，应用会自动执行 `git init` 并配置独立 `sync` remote（默认 `radxa@192.168.100.106:~/stillwrite.git`，可用 `localStorage['stillwrite.remote']` 覆盖）。若工作区已有指向同一地址的 `origin`，则直接复用 `origin`。
+
 ## 为什么不是单 HTML `file://`
 
 浏览器的目录读写 API 仍受安全上下文和兼容性限制。Stillwrite 使用 Tauri 的桌面 WebView + Rust 文件层，前端文件直接嵌入桌面应用，不需要浏览器目录授权模型。
@@ -81,13 +112,23 @@ src-tauri/target/release/bundle/deb/
 ```text
 stillwrite/
 ├── ui/
-│   ├── index.html      # 静态界面
-│   ├── app.js          # 文件树、自动保存、Markdown 预览、布局
+│   ├── index.html      # 静态界面（含搜索框、同步按钮）
+│   ├── app.js          # 文件树、搜索、同步、自动保存、Markdown 预览、布局
 │   └── style.css       # 沉浸式双栏视觉
 └── src-tauri/
-    ├── src/lib.rs      # 目录选择 + 工作区边界 + 文件读写
+    ├── src/lib.rs      # 目录选择 + 工作区边界 + 文件读写 + 8 个 command
+    ├── src/indexer.rs  # SQLite FTS5 侧车索引（rusqlite bundled）
+    ├── src/sync.rs     # git 同步引擎（最后写入者胜 + 单测 + 板子集成测试）
     ├── capabilities/   # 最小 IPC 权限
     └── tauri.conf.json # 直接把 ../ui 嵌入桌面应用
+```
+
+### 测试
+
+```bash
+cd src-tauri
+cargo test                # 16 个单测：索引 / 增量 / LWW 双向裁决
+cargo test -- --ignored live   # 需要 radxa 板子在线：真实跨设备推送/拉取/冲突收敛
 ```
 
 ## 当前 Markdown 支持
@@ -107,4 +148,6 @@ stillwrite/
 
 ## 当前刻意不做
 
-AI 写作、云同步、数据库、标签、插件系统、Git、富文本、复杂设置页、本地图片代理。
+AI 写作、云同步（远程托管）、数据库内容存储、标签、插件系统、富文本、复杂设置页、本地图片代理。
+
+> 注意：v0.2 原型新增的 SQLite 索引与 git 同步属于本分支实验内容；索引可随时删除重建，同步可随时通过 `git remote remove origin` 解除。

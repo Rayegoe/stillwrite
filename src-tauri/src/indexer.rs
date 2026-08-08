@@ -373,7 +373,7 @@ mod tests {
     fn word_count_basics() {
         assert_eq!(word_count("hello world"), 2);
         assert_eq!(word_count("你好世界"), 4);
-        assert_eq!(word_count("毛泽东选集"), 4);
+        assert_eq!(word_count("毛泽东选集"), 5);
         assert_eq!(word_count(""), 0);
     }
 }

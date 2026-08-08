@@ -369,8 +369,7 @@ async function doSync() {
 	setSyncState("同步中…");
 	syncButton.disabled = true;
 	try {
-		const remote =
-			localStorage.getItem("stillwrite.remote") || DEFAULT_REMOTE;
+		const remote = localStorage.getItem("stillwrite.remote") || DEFAULT_REMOTE;
 		const status = await invoke("sync_workspace", { remote });
 		autoSync = true;
 		setSyncState(status.message || "已同步", "ok");

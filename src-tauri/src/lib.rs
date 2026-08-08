@@ -360,26 +360,15 @@ async fn sync_workspace(
 ) -> Result<sync::SyncStatus, String> {
     let root = workspace_root(&state)?;
 
-    // 若尚未配置 origin 且前端提供了远程地址，自动补齐
+    // 确定同步 remote：origin 已指向 radxa 则复用，否则用独立 remote `sync`（不改用户 origin）
     let remote_hint = remote
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("radxa@192.168.100.106:~/stillwrite.git");
-    let has_origin = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(&root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !has_origin && remote.is_some() {
-        let _ = std::process::Command::new("git")
-            .args(["remote", "add", "origin", remote_hint])
-            .current_dir(&root)
-            .output();
-    }
+    let remote_name = sync::resolve_sync_remote(&root, remote_hint)?;
 
-    let status = sync::sync_workspace(&root, remote_hint)?;
+    let status = sync::sync_workspace(&root, remote_hint, &remote_name)?;
     // 同步后重建索引（增量，吸收远端变更）
     let _ = with_index(&app, &state, |conn, root| indexer::build_index(conn, root));
     Ok(status)
