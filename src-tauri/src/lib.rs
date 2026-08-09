@@ -39,6 +39,13 @@ fn is_markdown(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn validate_workspace_root(root: &Path) -> Result<(), String> {
+    if root.parent().is_none() {
+        return Err("不能将文件系统根目录作为工作区，请选择包含 Markdown 文件的具体文件夹".into());
+    }
+    Ok(())
+}
+
 fn scan_dir(path: &Path) -> Result<Vec<TreeNode>, String> {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
@@ -135,6 +142,7 @@ fn activate_workspace(
     if !root.is_dir() {
         return Err("选择的路径不是目录".into());
     }
+    validate_workspace_root(&root)?;
 
     let nodes = scan_dir(&root)?;
     {
@@ -190,12 +198,16 @@ async fn choose_workspace(app: AppHandle, state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-fn set_workspace(app: AppHandle, path: String, state: State<AppState>) -> Result<WorkspaceData, String> {
+async fn set_workspace(
+    app: AppHandle,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceData, String> {
     activate_workspace(PathBuf::from(path), &app, &state)
 }
 
 #[tauri::command]
-fn read_markdown(path: String, state: State<AppState>) -> Result<String, String> {
+async fn read_markdown(path: String, state: State<'_, AppState>) -> Result<String, String> {
     let path = ensure_existing_path_inside_workspace(&path, &state)?;
     if !is_markdown(&path) {
         return Err("只允许打开 Markdown 文件".into());
@@ -328,7 +340,11 @@ async fn write_markdown(app: AppHandle, path: String, content: String, state: St
 }
 
 #[tauri::command]
-fn create_markdown(app: AppHandle, relative_path: String, state: State<AppState>) -> Result<String, String> {
+async fn create_markdown(
+    app: AppHandle,
+    relative_path: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let root = workspace_root(&state)?;
     let target = create_new_markdown(&root, Path::new(&relative_path))?;
     let _ = with_index(&app, &state, |conn, root| indexer::index_single(conn, root, &target));
@@ -336,16 +352,19 @@ fn create_markdown(app: AppHandle, relative_path: String, state: State<AppState>
 }
 
 #[tauri::command]
-fn rebuild_index(app: AppHandle, state: State<AppState>) -> Result<(usize, usize), String> {
+async fn rebuild_index(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(usize, usize), String> {
     with_index(&app, &state, |conn, root| indexer::build_index(conn, root))
 }
 
 #[tauri::command]
-fn search_index(
+async fn search_index(
     app: AppHandle,
     query: String,
     limit: Option<usize>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<indexer::SearchHit>, String> {
     with_index(&app, &state, |conn, _| {
         indexer::search(conn, &query, limit.unwrap_or(30))
@@ -403,6 +422,19 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_root_cannot_be_a_workspace() {
+        let error = validate_workspace_root(Path::new("/")).unwrap_err();
+        assert!(error.contains("根目录"));
+    }
+
+    #[test]
+    fn normal_directory_can_be_a_workspace() {
+        let root = temp_dir("workspace-root");
+        assert!(validate_workspace_root(&root).is_ok());
     }
 
     // ---- create_dir_all_inside ----
