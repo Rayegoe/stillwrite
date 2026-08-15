@@ -9,6 +9,7 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+pub mod annotate;
 mod indexer;
 mod sync;
 
@@ -16,6 +17,8 @@ mod sync;
 struct AppState {
     root: Mutex<Option<PathBuf>>,
     index_db: Mutex<Option<PathBuf>>,
+    // Holding the file keeps the OS-level advisory lock alive for this process.
+    instance_lock: Mutex<Option<fs::File>>,
 }
 
 #[derive(Serialize)]
@@ -32,6 +35,15 @@ struct WorkspaceData {
     nodes: Vec<TreeNode>,
 }
 
+#[derive(Serialize)]
+struct OpenDocumentData {
+    root: String,
+    nodes: Vec<TreeNode>,
+    path: String,
+    name: String,
+    content: String,
+}
+
 fn is_markdown(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -46,14 +58,35 @@ fn validate_workspace_root(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn try_acquire_instance_lock(path: &Path) -> std::io::Result<Option<fs::File>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+fn is_ignored_directory(name: &str) -> bool {
+    matches!(name, "target" | "node_modules")
+}
+
 fn scan_dir(path: &Path) -> Result<Vec<TreeNode>, String> {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
 
     let entries = fs::read_dir(path).map_err(|e| format!("读取目录失败: {e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
-        let file_type = entry.file_type().map_err(|e| format!("读取类型失败: {e}"))?;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
 
@@ -62,7 +95,12 @@ fn scan_dir(path: &Path) -> Result<Vec<TreeNode>, String> {
         }
 
         if file_type.is_dir() {
-            let children = scan_dir(&path)?;
+            if is_ignored_directory(&name) {
+                continue;
+            }
+            let Ok(children) = scan_dir(&path) else {
+                continue;
+            };
             if !children.is_empty() {
                 dirs.push(TreeNode {
                     name,
@@ -152,9 +190,21 @@ fn activate_workspace(
             .map_err(|_| "工作区状态锁定失败".to_string())?;
         *guard = Some(root.clone());
     }
+    let index_db = resolve_index_db(app, &root).ok();
+    *state
+        .index_db
+        .lock()
+        .map_err(|_| "工作区状态锁定失败".to_string())? = index_db.clone();
 
-    // 建立侧车索引（增量）
-    let _ = with_index(app, state, |conn, root| indexer::build_index(conn, root));
+    // 文件树先返回给 UI；全文索引在后台增量更新，避免大目录看起来像“没有打开”。
+    if let Some(index_db) = index_db {
+        let index_root = root.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            if let Ok(mut conn) = indexer::open_index(&index_db) {
+                let _ = indexer::build_index(&mut conn, &index_root);
+            }
+        });
+    }
 
     Ok(WorkspaceData {
         root: root.to_string_lossy().to_string(),
@@ -198,6 +248,50 @@ async fn choose_workspace(app: AppHandle, state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
+async fn choose_document(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<OpenDocumentData>, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("打开 Markdown 文档")
+        .add_filter("Markdown", &["md", "markdown"])
+        .blocking_pick_file();
+
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|e| format!("文档路径不可用: {e}"))?;
+    let path = fs::canonicalize(path).map_err(|e| format!("打开文档失败: {e}"))?;
+    if !path.is_file() || !is_markdown(&path) {
+        return Err("请选择 .md 或 .markdown 文档".into());
+    }
+
+    let root = workspace_root(&state)
+        .ok()
+        .filter(|root| path.starts_with(root))
+        .or_else(|| path.parent().map(Path::to_path_buf))
+        .ok_or_else(|| "无法确定文档所在文件夹".to_string())?;
+    let WorkspaceData { root, nodes } = activate_workspace(root, &app, &state)?;
+    let content = fs::read_to_string(&path).map_err(|e| format!("读取文档失败: {e}"))?;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Markdown".to_string());
+
+    Ok(Some(OpenDocumentData {
+        root,
+        nodes,
+        path: path.to_string_lossy().to_string(),
+        name,
+        content,
+    }))
+}
+
+#[tauri::command]
 async fn set_workspace(
     app: AppHandle,
     path: String,
@@ -237,7 +331,7 @@ fn validate_new_markdown_path(rel: &Path) -> Result<(), String> {
 /// 在 root 之内逐级创建目录。
 /// 不使用 `fs::create_dir_all`，避免其跟随符号链接把目录建到工作区之外：
 /// 每一级都先检查 symlink 解析后的真实路径是否仍位于 root 内。
-fn create_dir_all_inside(root: &Path, dir: &Path) -> Result<(), String> {
+pub(crate) fn create_dir_all_inside(root: &Path, dir: &Path) -> Result<(), String> {
     let rel = dir
         .strip_prefix(root)
         .map_err(|_| "创建目录失败: 路径不在工作区内".to_string())?;
@@ -269,7 +363,7 @@ fn create_dir_all_inside(root: &Path, dir: &Path) -> Result<(), String> {
 
 /// 原子写入：同目录临时文件 + fsync + 原子 rename，避免保存中断留下损坏的半截文件。
 /// 写入前会把旧版本复制为同目录 `.bak` 备份（尽力而为，失败不阻断保存）。
-fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
     let parent = path.parent().ok_or_else(|| "写入路径无效".to_string())?;
     let file_name = path
         .file_name()
@@ -371,6 +465,57 @@ async fn search_index(
     })
 }
 
+/// 读取当前文档的批注（侧车不存在时返回空正文）。
+#[tauri::command]
+async fn read_annotation(
+    state: State<'_, AppState>,
+    doc_path: String,
+) -> Result<annotate::AnnotationData, String> {
+    let root = workspace_root(&state)?;
+    let doc = ensure_existing_path_inside_workspace(&doc_path, &state)?;
+    let rel = doc.strip_prefix(&root).unwrap_or(&doc);
+    if !annotate::is_annotation_target(rel) {
+        return Err("批注文件与批注汇总本身不能再写批注".into());
+    }
+    annotate::read_annotation_data(&root, &doc)
+}
+
+/// 保存当前文档的批注（正文为空则删除侧车 = 撤销批注）。
+#[tauri::command]
+async fn save_annotation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    doc_path: String,
+    body: String,
+) -> Result<(), String> {
+    let root = workspace_root(&state)?;
+    let doc = ensure_existing_path_inside_workspace(&doc_path, &state)?;
+    let rel = doc.strip_prefix(&root).unwrap_or(&doc);
+    if !annotate::is_annotation_target(rel) {
+        return Err("批注文件与批注汇总本身不能再写批注".into());
+    }
+    let sidecar = annotate::save_annotation(&root, &doc, &body)?;
+    // 批注文件也进全文索引（删除时清理即可，索引重建会吸收）
+    if sidecar.exists() {
+        let _ = with_index(&app, &state, |conn, root| indexer::index_single(conn, root, &sidecar));
+    }
+    Ok(())
+}
+
+/// 汇总所有单章批注到工作区根目录 `批注汇总.md`。
+#[tauri::command]
+async fn aggregate_annotations(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<annotate::AggregateResult, String> {
+    let root = workspace_root(&state)?;
+    let result = annotate::aggregate(&root)?;
+    let _ = with_index(&app, &state, |conn, root| {
+        indexer::index_single(conn, root, &root.join(annotate::AGGREGATE_NAME))
+    });
+    Ok(result)
+}
+
 #[tauri::command]
 async fn sync_workspace(
     app: AppHandle,
@@ -379,12 +524,12 @@ async fn sync_workspace(
 ) -> Result<sync::SyncStatus, String> {
     let root = workspace_root(&state)?;
 
-    // 确定同步 remote：origin 已指向 radxa 则复用，否则用独立 remote `sync`（不改用户 origin）
+    // 确定同步 remote：origin 已指向默认远端则复用，否则用独立 remote `sync`（不改用户 origin）
     let remote_hint = remote
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("radxa@192.168.100.106:~/stillwrite.git");
+        .unwrap_or("user@example.invalid:~/stillwrite.git");
     let remote_name = sync::resolve_sync_remote(&root, remote_hint)?;
 
     let status = sync::sync_workspace(&root, remote_hint, &remote_name)?;
@@ -397,15 +542,33 @@ async fn sync_workspace(
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|app| {
+            let lock_path = app.path().app_data_dir()?.join("stillwrite.lock");
+            match try_acquire_instance_lock(&lock_path)? {
+                Some(lock) => {
+                    app.state::<AppState>()
+                        .instance_lock
+                        .lock()
+                        .map_err(|_| std::io::Error::other("应用实例锁状态异常"))?
+                        .replace(lock);
+                }
+                None => app.handle().exit(0),
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             choose_workspace,
+            choose_document,
             set_workspace,
             read_markdown,
             write_markdown,
             create_markdown,
             rebuild_index,
             search_index,
+            read_annotation,
+            save_annotation,
+            aggregate_annotations,
             sync_workspace
         ])
         .run(tauri::generate_context!())
@@ -435,6 +598,30 @@ mod tests {
     fn normal_directory_can_be_a_workspace() {
         let root = temp_dir("workspace-root");
         assert!(validate_workspace_root(&root).is_ok());
+    }
+
+    #[test]
+    fn instance_lock_allows_only_one_process() {
+        let root = temp_dir("instance-lock");
+        let path = root.join("stillwrite.lock");
+        let first = try_acquire_instance_lock(&path).unwrap().unwrap();
+        assert!(try_acquire_instance_lock(&path).unwrap().is_none());
+        drop(first);
+        assert!(try_acquire_instance_lock(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn scan_dir_skips_generated_directories() {
+        let root = temp_dir("scan-generated");
+        fs::write(root.join("visible.md"), "visible").unwrap();
+        for name in ["target", "node_modules"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+            fs::write(root.join(name).join("generated.md"), "generated").unwrap();
+        }
+
+        let nodes = scan_dir(&root).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "visible.md");
     }
 
     // ---- create_dir_all_inside ----
@@ -536,6 +723,14 @@ mod tests {
         let root = temp_dir("cmd-create");
         let path = create_new_markdown(&root, Path::new("docs/notes/hello.md")).unwrap();
         assert_eq!(path, root.join("docs/notes/hello.md"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Untitled\n\n");
+    }
+
+    #[test]
+    fn create_new_markdown_creates_file_at_workspace_root() {
+        let root = temp_dir("cmd-create-root");
+        let path = create_new_markdown(&root, Path::new("hello.md")).unwrap();
+        assert_eq!(path, root.join("hello.md"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "# Untitled\n\n");
     }
 

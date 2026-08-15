@@ -18,14 +18,43 @@
           >
             ☰
           </button>
-          <button class="text-btn" id="openFolder">打开文件夹</button>
-          <button class="icon-btn" id="newFile" title="新建 Markdown (Ctrl+N)">
-            ＋
-          </button>
+          <div class="file-menu" id="fileMenuRoot">
+            <button
+              class="text-btn file-menu-trigger"
+              id="fileMenuButton"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              title="文件操作"
+            >
+              文件 <span aria-hidden="true">⌄</span>
+            </button>
+            <div class="file-menu-popover" id="fileMenu" role="menu" hidden>
+              <button id="openFolder" role="menuitem">
+                <span>打开文件夹…</span><kbd>Ctrl+O</kbd>
+              </button>
+              <button id="openDocument" role="menuitem">
+                <span>打开 Markdown…</span><kbd>Ctrl+Shift+O</kbd>
+              </button>
+              <div class="menu-divider" role="separator"></div>
+              <button id="newFile" role="menuitem">
+                <span>新建 Markdown</span><kbd>Ctrl+N</kbd>
+              </button>
+              <button id="saveDocument" role="menuitem">
+                <span>保存</span><kbd>Ctrl+S</kbd>
+              </button>
+              <button id="refreshMenu" role="menuitem">
+                <span>刷新目录</span><kbd>Ctrl+R</kbd>
+              </button>
+              <div class="menu-divider" role="separator"></div>
+              <button id="aggregateMenu" role="menuitem">
+                <span>汇总批注 → 批注汇总.md</span>
+              </button>
+            </div>
+          </div>
           <button
             class="text-btn"
             id="syncButton"
-            title="git 同步到远端 (radxa)，首次手动同步后自动保存会跟随同步"
+            title="git 同步到远端，首次手动同步后自动保存会跟随同步"
           >
             ⟳ 同步
           </button>
@@ -35,6 +64,13 @@
         <div class="toolbar-right">
           <span class="sync-state" id="syncState" hidden></span>
           <span class="save-state" id="saveState">就绪</span>
+          <button
+            class="text-btn annotate-btn"
+            id="annotationButton"
+            title="批注（按文档写笔记，汇总到 批注汇总.md）"
+          >
+            批注
+          </button>
           <div class="segmented" aria-label="视图模式">
             <button data-view="editor" title="仅写作 (Ctrl+1)">写</button>
             <button class="active" data-view="split" title="双栏 (Ctrl+2)">
@@ -62,7 +98,7 @@
             />
           </div>
           <div class="tree" id="tree">
-            <div class="empty-tip">打开一个 Markdown 文件夹</div>
+            <div class="empty-tip">从“文件”菜单打开文件夹或 Markdown 文档</div>
           </div>
         </aside>
         <div
@@ -92,7 +128,7 @@
             <article class="markdown-body" id="preview">
               <div class="welcome">
                 <h1>Stillwrite</h1>
-                <p>打开一个文件夹，选择左侧 Markdown 文件开始写作。</p>
+                <p>从“文件”菜单打开文件夹或 Markdown 文档开始写作。</p>
                 <p>
                   <kbd>Ctrl+1</kbd> 写作 · <kbd>Ctrl+2</kbd> 双栏 ·
                   <kbd>Ctrl+3</kbd> 阅读
@@ -100,6 +136,51 @@
               </div>
             </article>
           </section>
+        </section>
+        <div
+          class="resize-handle annotate-handle"
+          id="annotateHandle"
+          title="拖动调整批注栏"
+        ></div>
+        <section class="annotate-panel" id="annotatePanel" hidden>
+          <div class="annotate-head">
+            <span class="annotate-title">批注</span>
+            <div class="annotate-actions">
+              <button
+                class="text-btn"
+                id="aggregateButton"
+                title="汇总所有单章批注到工作区根目录 批注汇总.md"
+              >
+                汇总批注
+              </button>
+              <button
+                class="icon-btn subtle"
+                id="closeAnnotate"
+                title="关闭批注栏"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+          <div class="annotate-doc">
+            <div class="annotate-doc-name" id="annotateDocName">未打开文档</div>
+            <div class="annotate-doc-path" id="annotateDocPath"></div>
+          </div>
+          <div class="annotate-note">
+            <div class="annotate-section-label">
+              批注
+              <span class="annotate-save-state" id="annotateSaveState"></span>
+            </div>
+            <textarea
+              id="annotateEditor"
+              spellcheck="true"
+              autocomplete="off"
+              placeholder="对这篇文档写点什么…（支持 Markdown）"
+            ></textarea>
+          </div>
+          <div class="annotate-foot" id="annotateFoot">
+            批注保存在工作区「批注/」文件夹，随文档一起 git 同步。
+          </div>
         </section>
       </main>
     </div>
@@ -111,8 +192,8 @@
         <input id="newFileName" value="untitled.md" autocomplete="off" />
         <p class="modal-help">可包含子目录，例如 <code>notes/idea.md</code></p>
         <div class="modal-actions">
-          <button type="button" value="cancel" class="text-btn">取消</button>
-          <button value="default" class="primary-btn" id="createFileButton">
+          <button type="button" class="text-btn" id="cancelNewFile">取消</button>
+          <button type="submit" class="primary-btn" id="createFileButton">
             创建
           </button>
         </div>

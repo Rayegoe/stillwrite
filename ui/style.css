@@ -110,6 +110,60 @@ textarea:focus-visible {
 	padding: 0 10px;
 	font-size: 12px;
 }
+.file-menu {
+	position: relative;
+}
+.file-menu-trigger[aria-expanded="true"] {
+	background: var(--active);
+}
+.file-menu-popover {
+	position: absolute;
+	top: calc(100% + 7px);
+	left: 0;
+	z-index: 30;
+	width: 250px;
+	padding: 6px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--paper);
+	box-shadow: 0 14px 38px rgba(25, 22, 18, 0.18);
+}
+.file-menu-popover[hidden] {
+	display: none;
+}
+.file-menu-popover button {
+	width: 100%;
+	height: 32px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px;
+	padding: 0 9px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	font-size: 12px;
+	text-align: left;
+	cursor: pointer;
+}
+.file-menu-popover button:hover,
+.file-menu-popover button:focus-visible {
+	background: var(--hover);
+}
+.file-menu-popover kbd {
+	margin-left: auto;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: var(--muted);
+	font-size: 10px;
+	font-weight: 400;
+}
+.menu-divider {
+	height: 1px;
+	margin: 5px 4px;
+	background: var(--line);
+}
 .primary-btn {
 	padding: 0 12px;
 	background: #413d38;
@@ -314,6 +368,132 @@ body.resizing .resize-handle::after {
 }
 .resize-handle.hidden {
 	display: none;
+}
+
+/* ---- 批注栏（章后语） ---- */
+.annotate-btn.active {
+	background: var(--active);
+	color: var(--ink);
+}
+.annotate-panel {
+	width: var(--annotate-width);
+	flex: 0 0 var(--annotate-width);
+	min-width: 0;
+	min-height: 0;
+	background: var(--panel);
+	display: flex;
+	flex-direction: column;
+	transition:
+		width 0.14s ease,
+		flex-basis 0.14s ease,
+		opacity 0.14s ease;
+}
+.annotate-panel.hidden {
+	width: 0;
+	flex-basis: 0;
+	opacity: 0;
+	pointer-events: none;
+	overflow: hidden;
+}
+.annotate-head {
+	height: 46px;
+	flex: 0 0 46px;
+	padding: 0 10px 0 14px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	border-bottom: 1px solid var(--line);
+}
+.annotate-title {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+.annotate-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+.annotate-doc {
+	padding: 10px 14px 8px;
+	border-bottom: 1px solid var(--line);
+}
+.annotate-doc-name {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--ink);
+}
+.annotate-doc-path {
+	font-size: 10px;
+	color: var(--muted);
+	margin-top: 2px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.annotate-section-label {
+	padding: 10px 14px 5px;
+	font-size: 10px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--muted);
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+.annotate-save-state {
+	font-size: 10px;
+	text-transform: none;
+	letter-spacing: 0;
+}
+.annotate-save-state.dirty {
+	color: #a07137;
+}
+.annotate-save-state.error {
+	color: #a43e38;
+}
+.annotate-note {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+.annotate-note .annotate-section-label {
+	padding-bottom: 6px;
+}
+#annotateEditor {
+	flex: 1;
+	min-height: 0;
+	resize: none;
+	border: 0;
+	outline: 0;
+	margin: 0;
+	padding: 2px 14px 16px;
+	background: transparent;
+	color: var(--ink);
+	font-family: inherit;
+	font-size: 13px;
+	line-height: 1.7;
+	caret-color: #38342f;
+	scrollbar-width: thin;
+	scrollbar-color: rgba(70, 60, 50, 0.18) transparent;
+}
+.annotate-foot {
+	flex: 0 0 auto;
+	padding: 8px 14px;
+	font-size: 10px;
+	color: var(--muted);
+	line-height: 1.5;
+	border-top: 1px solid var(--line);
+}
+
+@media (prefers-color-scheme: dark) {
+	#annotateEditor {
+		caret-color: #dedad2;
+	}
 }
 body.resizing {
 	cursor: col-resize !important;

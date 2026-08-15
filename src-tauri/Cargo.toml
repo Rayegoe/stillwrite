@@ -7,7 +7,10 @@ edition = "2021"
 
 [lib]
 name = "stillwrite_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Stillwrite currently ships as a desktop app.  The static/cdylib outputs are
+# only needed by Tauri's mobile targets and make each debug build emit hundreds
+# of megabytes of duplicate library artifacts.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -17,3 +20,23 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+libc = "0.2"
+
+# Keep local builds compact. Full debug info and Cargo's incremental cache were
+# responsible for most of the multi-gigabyte target directory.
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
+
+# The distributed binary does not need symbols or unwinding metadata. Thin LTO
+# gives most of the size benefit without the very slow link of full LTO.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+panic = "abort"
+strip = true

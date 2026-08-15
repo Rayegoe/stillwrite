@@ -336,28 +336,28 @@ mod tests {
         // 场景 1：origin 指向 GitHub（外来）→ 用 sync，origin 保持原样
         let ws = base.join("ws");
         git_in(&base, &["init", "-q", "-b", "main", ws.to_str().unwrap()]);
-        git_in(&ws, &["remote", "add", "origin", "https://github.com/Rayegoe/stillwrite.git"]);
-        let name = resolve_sync_remote(&ws, "radxa@192.168.100.106:~/stillwrite.git").unwrap();
+        git_in(&ws, &["remote", "add", "origin", "https://example.invalid/stillwrite.git"]);
+        let name = resolve_sync_remote(&ws, "user@example.invalid:~/stillwrite.git").unwrap();
         assert_eq!(name, "sync");
         let (_, origin_url) = git(&ws, &["remote", "get-url", "origin"]).unwrap();
-        assert_eq!(origin_url, "https://github.com/Rayegoe/stillwrite.git", "外来 origin 不得被改写");
+        assert_eq!(origin_url, "https://example.invalid/stillwrite.git", "外来 origin 不得被改写");
         let (_, sync_url) = git(&ws, &["remote", "get-url", "sync"]).unwrap();
-        assert_eq!(sync_url, "radxa@192.168.100.106:~/stillwrite.git");
+        assert_eq!(sync_url, "user@example.invalid:~/stillwrite.git");
 
-        // 场景 2：origin 已指向 radxa → 直接复用 origin
+        // 场景 2：origin 已指向默认远端 → 直接复用 origin
         let ws2 = base.join("ws2");
         git_in(&base, &["init", "-q", "-b", "main", ws2.to_str().unwrap()]);
-        git_in(&ws2, &["remote", "add", "origin", "radxa@192.168.100.106:~/stillwrite.git"]);
-        let name2 = resolve_sync_remote(&ws2, "radxa@192.168.100.106:~/stillwrite.git").unwrap();
+        git_in(&ws2, &["remote", "add", "origin", "user@example.invalid:~/stillwrite.git"]);
+        let name2 = resolve_sync_remote(&ws2, "user@example.invalid:~/stillwrite.git").unwrap();
         assert_eq!(name2, "origin");
 
         // 场景 3：无 origin → 创建 sync
         let ws3 = base.join("ws3");
         git_in(&base, &["init", "-q", "-b", "main", ws3.to_str().unwrap()]);
-        let name3 = resolve_sync_remote(&ws3, "radxa@192.168.100.106:~/stillwrite.git").unwrap();
+        let name3 = resolve_sync_remote(&ws3, "user@example.invalid:~/stillwrite.git").unwrap();
         assert_eq!(name3, "sync");
         let (_, sync3) = git(&ws3, &["remote", "get-url", "sync"]).unwrap();
-        assert_eq!(sync3, "radxa@192.168.100.106:~/stillwrite.git");
+        assert_eq!(sync3, "user@example.invalid:~/stillwrite.git");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -403,17 +403,17 @@ mod live_tests {
     use super::tests::{fresh_dir, git_in, setup_identity};
     use super::*;
 
-    const BOARD: &str = "radxa@192.168.100.106:~/stillwrite.git";
+    const BOARD: &str = "user@example.invalid:~/stillwrite.git";
 
     #[test]
-    #[ignore = "需要 radxa 板子在线（LAN）"]
-    fn live_push_pull_and_conflict_against_radxa() {
+    #[ignore = "需要配置的远程设备在线（LAN）"]
+    fn live_push_pull_and_conflict_against_remote() {
         // 0) 清空板子仓库引用，保证每次确定性执行（裸仓库无工作区，安全）
         let reset = Command::new("ssh")
             .args([
                 "-o",
                 "BatchMode=yes",
-                "orangepi-jump",
+                "example.invalid",
                 "git --git-dir=$HOME/stillwrite.git for-each-ref --format='%(refname)' | xargs -r -I{} git --git-dir=$HOME/stillwrite.git update-ref -d {}; git --git-dir=$HOME/stillwrite.git symbolic-ref HEAD refs/heads/main",
             ])
             .output()
@@ -441,7 +441,7 @@ mod live_tests {
             .args([
                 "-o",
                 "BatchMode=yes",
-                "orangepi-jump",
+                "example.invalid",
                 &format!("git --git-dir=$HOME/stillwrite.git show main:live.md | grep -c 'push tag: {tag}'"),
             ])
             .output()
@@ -455,12 +455,12 @@ mod live_tests {
         // 3) 在板子上建工作区，改同一文件并推送（模拟设备 B 编辑）
         let board_script = format!(
             "rm -rf /tmp/sw-board-ws && git clone -q ~/stillwrite.git /tmp/sw-board-ws 2>/dev/null; \
-             cd /tmp/sw-board-ws && git checkout -q main && git config user.name Board && git config user.email board@radxa && \
+             cd /tmp/sw-board-ws && git checkout -q main && git config user.name Board && git config user.email board@example.invalid && \
              echo '# Live Test\n\nfrom board (newer)' > live.md && \
              git add -A && git commit -qm board-edit && git push -q origin main"
         );
         let board_edit = Command::new("ssh")
-            .args(["-o", "BatchMode=yes", "orangepi-jump", &board_script])
+            .args(["-o", "BatchMode=yes", "example.invalid", &board_script])
             .output()
             .expect("ssh 执行失败");
         assert!(
@@ -489,7 +489,7 @@ mod live_tests {
             .args([
                 "-o",
                 "BatchMode=yes",
-                "orangepi-jump",
+                "example.invalid",
                 "cd /tmp/sw-board-ws && git pull -q --no-rebase && grep -c 'newest local' live.md",
             ])
             .output()
