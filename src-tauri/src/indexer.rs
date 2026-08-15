@@ -103,6 +103,9 @@ fn walk(root: &Path) -> Vec<(PathBuf, i64, u64)> {
             let path = entry.path();
             if let Ok(ft) = entry.file_type() {
                 if ft.is_dir() {
+                    if matches!(name.as_ref(), "target" | "node_modules") {
+                        continue;
+                    }
                     stack.push(path);
                 } else if ft.is_file() && is_markdown(&path) {
                     if let Ok(meta) = entry.metadata() {
@@ -385,12 +388,14 @@ mod debug_tests {
     #[test]
     #[ignore = "临时调试：真实工作区"]
     fn debug_real_workspace_index() {
-        let root = std::path::Path::new("/home/barry/writing");
+        let root = std::env::var_os("STILLWRITE_DEBUG_WORKSPACE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("stillwrite-debug-workspace"));
         let db = std::path::Path::new("/tmp/sw-debug-index/index.db");
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         let _ = std::fs::remove_file(db);
         let mut conn = open_index(db).expect("open_index 失败");
-        match build_index(&mut conn, root) {
+        match build_index(&mut conn, &root) {
             Ok((u, r)) => println!("build_index OK: updated={u} removed={r}"),
             Err(e) => println!("build_index FAIL: {e}"),
         }

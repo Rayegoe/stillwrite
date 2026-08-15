@@ -19,6 +19,20 @@ const newFileForm = document.querySelector("#newFileForm");
 const syncButton = document.querySelector("#syncButton");
 const syncStateEl = document.querySelector("#syncState");
 const searchInput = document.querySelector("#searchInput");
+const fileMenuRoot = document.querySelector("#fileMenuRoot");
+const fileMenuButton = document.querySelector("#fileMenuButton");
+const fileMenu = document.querySelector("#fileMenu");
+const annotationButton = document.querySelector("#annotationButton");
+const annotatePanel = document.querySelector("#annotatePanel");
+const annotateHandle = document.querySelector("#annotateHandle");
+const closeAnnotate = document.querySelector("#closeAnnotate");
+const aggregateButton = document.querySelector("#aggregateButton");
+const aggregateMenu = document.querySelector("#aggregateMenu");
+const annotateDocName = document.querySelector("#annotateDocName");
+const annotateDocPath = document.querySelector("#annotateDocPath");
+const annotateEditor = document.querySelector("#annotateEditor");
+const annotateSaveState = document.querySelector("#annotateSaveState");
+const annotateFoot = document.querySelector("#annotateFoot");
 
 let rootPath = localStorage.getItem("stillwrite.rootPath");
 let currentFile = null;
@@ -32,11 +46,46 @@ let sidebarVisible =
 let viewMode = localStorage.getItem("stillwrite.viewMode") || "split";
 let loadToken = 0;
 
-const DEFAULT_REMOTE = "radxa@192.168.100.106:~/stillwrite.git";
+let annotateVisible =
+	localStorage.getItem("stillwrite.annotateVisible") !== "false";
+let annotateWidth = Number(
+	localStorage.getItem("stillwrite.annotateWidth") || 320,
+);
+let annotateBody = ""; // 当前文档的批注正文（每篇文档一篇）
+let annotateLoadedDoc = null; // 当前加载了批注的文档路径
+let annotateDirty = false; // 批注文本是否有未保存改动
+let annotateTimer = null;
+
+const DEFAULT_REMOTE = "user@example.invalid:~/stillwrite.git";
 let autoSync = false; // 首次手动同步成功后开启自动同步
 let syncTimer = null;
-const searchTimer = null;
+let searchTimer = null;
+let previewTimer = null;
 let lastTreeNodes = [];
+
+const ALLOWED_PREVIEW_TAGS = new Set([
+	"P",
+	"H1",
+	"H2",
+	"H3",
+	"H4",
+	"H5",
+	"H6",
+	"STRONG",
+	"EM",
+	"DEL",
+	"CODE",
+	"PRE",
+	"UL",
+	"OL",
+	"LI",
+	"BLOCKQUOTE",
+	"A",
+	"HR",
+	"DIV",
+	"SPAN",
+	"BR",
+]);
 
 function escapeHtml(value) {
 	return value
@@ -84,7 +133,8 @@ function renderMarkdown(source) {
 
 	const flushParagraph = () => {
 		if (!paragraph.length) return;
-		html.push(`<p>${renderInline(paragraph.join(" "))}</p>`);
+		// 段落内软换行保留为 <br>：多行笔记（如批注正文）不会在阅读区被并成一行
+		html.push(`<p>${paragraph.map((line) => renderInline(line)).join("<br>")}</p>`);
 		paragraph = [];
 	};
 	const closeList = () => {
@@ -177,31 +227,8 @@ function sanitizeHtml(html) {
 	// Defense-in-depth: renderMarkdown escapes user content, but never let raw
 	// script/event markup through if a future renderer regression slips.
 	const doc = new DOMParser().parseFromString(html, "text/html");
-	const allowed = new Set([
-		"P",
-		"H1",
-		"H2",
-		"H3",
-		"H4",
-		"H5",
-		"H6",
-		"STRONG",
-		"EM",
-		"DEL",
-		"CODE",
-		"PRE",
-		"UL",
-		"OL",
-		"LI",
-		"BLOCKQUOTE",
-		"A",
-		"HR",
-		"DIV",
-		"SPAN",
-		"BR",
-	]);
 	[...doc.body.querySelectorAll("*")].reverse().forEach((el) => {
-		if (!allowed.has(el.tagName)) {
+		if (!ALLOWED_PREVIEW_TAGS.has(el.tagName)) {
 			el.replaceWith(document.createTextNode(el.textContent));
 			return;
 		}
@@ -223,8 +250,17 @@ function sanitizeHtml(html) {
 }
 
 function updatePreview() {
+	if (previewTimer) {
+		clearTimeout(previewTimer);
+		previewTimer = null;
+	}
 	const doc = sanitizeHtml(renderMarkdown(editor.value));
 	previewEl.replaceChildren(...doc.body.childNodes);
+}
+
+function schedulePreview() {
+	if (previewTimer) clearTimeout(previewTimer);
+	previewTimer = setTimeout(updatePreview, 100);
 }
 
 function markDirty() {
@@ -273,6 +309,7 @@ async function useWorkspace(data) {
 	rootPath = data.root;
 	localStorage.setItem("stillwrite.rootPath", rootPath);
 	workspaceNameEl.textContent = basename(rootPath);
+	workspaceNameEl.title = rootPath;
 	lastTreeNodes = data.nodes;
 	renderTree(data.nodes);
 }
@@ -288,9 +325,24 @@ async function chooseWorkspace() {
 		updatePreview();
 		documentTitleEl.textContent = "Stillwrite";
 		await useWorkspace(data);
+		if (annotateVisible) loadAnnotationPanel();
 	} catch (error) {
 		console.error(error);
 		markError("目录打开失败");
+	}
+}
+
+async function chooseDocument() {
+	try {
+		await saveCurrent();
+		const data = await invoke("choose_document");
+		if (!data) return;
+		currentFile = data.path;
+		await useWorkspace(data);
+		showDocument(data.path, data.name, data.content, null);
+	} catch (error) {
+		console.error(error);
+		markError("文档打开失败");
 	}
 }
 
@@ -324,21 +376,27 @@ async function openFile(path, name, row) {
 	try {
 		const text = await invoke("read_markdown", { path });
 		if (token !== loadToken) return;
-		currentFile = path;
-		editor.value = text;
-		updatePreview();
-		documentTitleEl.textContent = name.replace(/\.(md|markdown)$/i, "");
-		document
-			.querySelectorAll(".tree-file.active")
-			.forEach((el) => el.classList.remove("active"));
-		if (row) row.classList.add("active");
-		editor.scrollTop = 0;
-		previewEl.scrollTop = 0;
-		markSaved();
+		showDocument(path, name, text, row);
 	} catch (error) {
 		console.error(error);
 		markError("打开失败");
 	}
+}
+
+function showDocument(path, name, text, row) {
+	currentFile = path;
+	editor.value = text;
+	updatePreview();
+	documentTitleEl.textContent = name.replace(/\.(md|markdown)$/i, "");
+	document
+		.querySelectorAll(".tree-file.active")
+		.forEach((el) => el.classList.remove("active"));
+	if (row) row.classList.add("active");
+	else if (lastTreeNodes.length) renderTree(lastTreeNodes);
+	editor.scrollTop = 0;
+	previewEl.scrollTop = 0;
+	markSaved();
+	if (annotateVisible) loadAnnotationPanel();
 }
 
 async function createFile(relativePath) {
@@ -386,6 +444,143 @@ async function doSync() {
 	} finally {
 		syncButton.disabled = false;
 	}
+}
+
+// 读取当前文档的批注（工作区任意文档都可批注，不区分章节）。
+async function loadAnnotationPanel() {
+	if (!currentFile) {
+		annotateDocName.textContent = "未打开文档";
+		annotateDocPath.textContent = "";
+		annotateEditor.value = "";
+		annotateBody = "";
+		annotateLoadedDoc = null;
+		annotateSaveState.textContent = "";
+		annotateSaveState.classList.remove("dirty", "error");
+		return;
+	}
+	try {
+		const data = await invoke("read_annotation", { docPath: currentFile });
+		annotateBody = data.body || "";
+		annotateLoadedDoc = currentFile;
+		annotateDocName.textContent = basename(currentFile).replace(
+			/\.(md|markdown)$/i,
+			"",
+		);
+		annotateDocPath.textContent = currentFile;
+		annotateEditor.value = annotateBody;
+		annotateDirty = false;
+		annotateSaveState.textContent = annotateBody ? "已保存" : "";
+		annotateSaveState.classList.remove("dirty", "error");
+		annotateFoot.textContent = "批注保存在工作区「批注/」文件夹，随文档一起 git 同步。";
+	} catch (error) {
+		console.error(error);
+		annotateFoot.textContent = String(error).includes("不能再写批注")
+			? "批注文件本身不能再批注"
+			: "读取批注失败";
+	}
+}
+
+function markAnnotateDirty() {
+	annotateDirty = true;
+	annotateSaveState.textContent = "编辑中…";
+	annotateSaveState.classList.add("dirty");
+	annotateSaveState.classList.remove("error");
+}
+
+function scheduleAnnotateSave() {
+	if (!currentFile) return;
+	if (annotateTimer) clearTimeout(annotateTimer);
+	annotateTimer = setTimeout(saveAnnotate, 650);
+}
+
+async function saveAnnotate() {
+	if (!currentFile) return;
+	if (annotateTimer) {
+		clearTimeout(annotateTimer);
+		annotateTimer = null;
+	}
+	annotateBody = annotateEditor.value;
+	try {
+		await invoke("save_annotation", {
+			docPath: currentFile,
+			body: annotateBody,
+		});
+		annotateSaveState.textContent = annotateBody.trim() ? "已保存" : "";
+		annotateSaveState.classList.remove("dirty", "error");
+		annotateDirty = false;
+		// 若当前打开的就是刚写入的侧车文件，从磁盘重读，避免陈旧缓冲区覆盖新批注
+		const sidecar = annotateSidecarPath(currentFile);
+		if (sidecar && samePath(currentFile, sidecar)) {
+			const text = await invoke("read_markdown", { path: currentFile });
+			showDocument(currentFile, basename(currentFile), text, null);
+		}
+	} catch (error) {
+		console.error(error);
+		annotateSaveState.textContent = "保存失败";
+		annotateSaveState.classList.add("error");
+	}
+}
+
+// 源文档是否允许批注（批注文件与汇总文件自身不能再批注）
+function isAnnotatablePath(path) {
+	if (!path) return false;
+	const normalized = path.replaceAll("\\", "/");
+	return !(
+		normalized.endsWith("/批注汇总.md") ||
+		normalized.includes("/批注/")
+	);
+}
+
+// 源文档相对工作区的侧车路径（批注/<相对路径>），无法计算时返回 null
+function annotateSidecarPath(docPath) {
+	if (!rootPath || !docPath) return null;
+	const doc = docPath.replaceAll("\\", "/");
+	const root = rootPath.replaceAll("\\", "/");
+	if (!doc.startsWith(root + "/")) return null;
+	const rel = doc.slice(root.length + 1);
+	return root + "/批注/" + rel;
+}
+
+function samePath(a, b) {
+	return a.replaceAll("\\", "/") === b.replaceAll("\\", "/");
+}
+
+async function doAggregateAnnotations() {
+	if (!rootPath) return;
+	// 先落盘待保存的批注：刚打完字就点汇总时，650ms 防抖可能还没触发
+	if (currentFile && isAnnotatablePath(currentFile) && annotateDirty)
+		await saveAnnotate();
+	aggregateButton.disabled = true;
+	annotateFoot.textContent = "汇总中…";
+	try {
+		const result = await invoke("aggregate_annotations");
+		annotateFoot.textContent = `已汇总 ${result.count} 篇批注 → 批注汇总.md`;
+		await refreshTree();
+		// 若当前打开的文档就是汇总文件，从磁盘重读：
+		// 否则编辑器里的陈旧缓冲区会在下次保存时把新汇总内容覆盖回去。
+		if (currentFile && result.path && samePath(currentFile, result.path)) {
+			const text = await invoke("read_markdown", { path: currentFile });
+			showDocument(currentFile, basename(currentFile), text, null);
+		}
+	} catch (error) {
+		console.error(error);
+		annotateFoot.textContent = "汇总失败";
+	} finally {
+		aggregateButton.disabled = false;
+	}
+}
+
+function setAnnotateVisible(visible) {
+	annotateVisible = visible;
+	localStorage.setItem("stillwrite.annotateVisible", String(visible));
+	annotationButton.classList.toggle("active", visible);
+	annotatePanel.classList.toggle("hidden", !visible);
+	annotateHandle.classList.toggle("hidden", !visible);
+	document.documentElement.style.setProperty(
+		"--annotate-width",
+		`${annotateWidth}px`,
+	);
+	if (visible) loadAnnotationPanel();
 }
 
 function clearSearch() {
@@ -442,39 +637,55 @@ function renderSearchResults(hits) {
 function renderTree(nodes) {
 	lastTreeNodes = nodes;
 	treeEl.replaceChildren();
+	const rootNode = {
+		name: basename(rootPath),
+		path: rootPath,
+		is_dir: true,
+		children: nodes,
+	};
+	treeEl.appendChild(treeNodeElement(rootNode, 0, true));
 	if (!nodes.length) {
 		const tip = document.createElement("div");
 		tip.className = "empty-tip";
 		tip.textContent = "这个文件夹里还没有 Markdown 文件";
 		treeEl.appendChild(tip);
-		return;
 	}
-	const fragment = document.createDocumentFragment();
-	nodes.forEach((node) => fragment.appendChild(treeNodeElement(node, 0)));
-	treeEl.appendChild(fragment);
 }
 
-function treeNodeElement(node, depth) {
+function treeNodeElement(node, depth, forceExpanded = false) {
 	if (node.is_dir) {
 		const wrap = document.createElement("div");
-		wrap.className = "tree-dir-wrap";
+		const normalizedDir = node.path.replaceAll("\\", "/").replace(/\/+$/, "");
+		const normalizedFile = currentFile?.replaceAll("\\", "/");
+		const expanded =
+			forceExpanded || normalizedFile?.startsWith(`${normalizedDir}/`) || false;
+		wrap.className = expanded ? "tree-dir-wrap" : "tree-dir-wrap collapsed";
 		const button = document.createElement("button");
 		button.className = "tree-dir";
 		button.style.paddingLeft = `${12 + depth * 14}px`;
 		const chevron = document.createElement("span");
 		chevron.className = "chevron";
-		chevron.textContent = "⌄";
+		chevron.textContent = expanded ? "⌄" : "›";
 		const name = document.createElement("span");
 		name.className = "node-name";
 		name.textContent = node.name;
 		button.append(chevron, name);
 		const children = document.createElement("div");
 		children.className = "tree-children";
-		node.children.forEach((child) =>
-			children.appendChild(treeNodeElement(child, depth + 1)),
-		);
+		let childrenRendered = false;
+		const renderChildren = () => {
+			if (childrenRendered) return;
+			const fragment = document.createDocumentFragment();
+			node.children.forEach((child) =>
+				fragment.appendChild(treeNodeElement(child, depth + 1)),
+			);
+			children.appendChild(fragment);
+			childrenRendered = true;
+		};
+		if (expanded) renderChildren();
 		button.addEventListener("click", () => {
 			const collapsed = wrap.classList.toggle("collapsed");
+			if (!collapsed) renderChildren();
 			chevron.textContent = collapsed ? "›" : "⌄";
 		});
 		wrap.append(button, children);
@@ -501,14 +712,22 @@ function basename(path) {
 function applyLayout() {
 	sidebarWidth = Math.max(180, Math.min(420, sidebarWidth));
 	splitRatio = Math.max(20, Math.min(80, splitRatio));
+	annotateWidth = Math.max(240, Math.min(520, annotateWidth));
 	document.documentElement.style.setProperty(
 		"--sidebar-width",
 		`${sidebarWidth}px`,
+	);
+	document.documentElement.style.setProperty(
+		"--annotate-width",
+		`${annotateWidth}px`,
 	);
 	editorPane.style.flexBasis = `${splitRatio}%`;
 	readerPane.style.flexBasis = `${100 - splitRatio}%`;
 	sidebar.classList.toggle("hidden", !sidebarVisible);
 	sidebarHandle.classList.toggle("hidden", !sidebarVisible);
+	annotatePanel.classList.toggle("hidden", !annotateVisible);
+	annotateHandle.classList.toggle("hidden", !annotateVisible);
+	annotationButton.classList.toggle("active", annotateVisible);
 	shell.dataset.mode = viewMode;
 	document.querySelectorAll("[data-view]").forEach((button) => {
 		button.classList.toggle("active", button.dataset.view === viewMode);
@@ -549,6 +768,11 @@ function bindResize(handle, getStart, onMove, onEnd) {
 	});
 }
 
+function setFileMenuOpen(open) {
+	fileMenu.hidden = !open;
+	fileMenuButton.setAttribute("aria-expanded", String(open));
+}
+
 bindResize(
 	sidebarHandle,
 	() => sidebarWidth,
@@ -574,8 +798,21 @@ bindResize(
 	() => localStorage.setItem("stillwrite.splitRatio", String(splitRatio)),
 );
 
+bindResize(
+	annotateHandle,
+	() => annotateWidth,
+	(start, dx) => {
+		annotateWidth = Math.max(240, Math.min(520, start - dx));
+		document.documentElement.style.setProperty(
+			"--annotate-width",
+			`${annotateWidth}px`,
+		);
+	},
+	() => localStorage.setItem("stillwrite.annotateWidth", String(annotateWidth)),
+);
+
 editor.addEventListener("input", () => {
-	updatePreview();
+	schedulePreview();
 	markDirty();
 	scheduleSave();
 });
@@ -593,7 +830,19 @@ editor.addEventListener("keydown", (event) => {
 document
 	.querySelector("#openFolder")
 	.addEventListener("click", chooseWorkspace);
+document
+	.querySelector("#openDocument")
+	.addEventListener("click", chooseDocument);
 document.querySelector("#refreshTree").addEventListener("click", refreshTree);
+document.querySelector("#refreshMenu").addEventListener("click", refreshTree);
+document.querySelector("#saveDocument").addEventListener("click", saveCurrent);
+fileMenuButton.addEventListener("click", () => setFileMenuOpen(fileMenu.hidden));
+fileMenu.addEventListener("click", (event) => {
+	if (event.target.closest("button")) setFileMenuOpen(false);
+});
+document.addEventListener("pointerdown", (event) => {
+	if (!fileMenuRoot.contains(event.target)) setFileMenuOpen(false);
+});
 document
 	.querySelector("#toggleSidebar")
 	.addEventListener("click", () => setSidebarVisible(!sidebarVisible));
@@ -608,6 +857,25 @@ document.querySelector("#newFile").addEventListener("click", async () => {
 });
 
 document.querySelector("#syncButton").addEventListener("click", doSync);
+annotationButton.addEventListener("click", () => setAnnotateVisible(!annotateVisible));
+closeAnnotate.addEventListener("click", () => setAnnotateVisible(false));
+aggregateButton.addEventListener("click", doAggregateAnnotations);
+aggregateMenu.addEventListener("click", () => {
+	if (!annotateVisible) setAnnotateVisible(true);
+	doAggregateAnnotations();
+});
+annotateEditor.addEventListener("input", () => {
+	markAnnotateDirty();
+	scheduleAnnotateSave();
+});
+annotateEditor.addEventListener("keydown", (event) => {
+	if (event.key === "Tab") {
+		event.preventDefault();
+		const start = annotateEditor.selectionStart;
+		const end = annotateEditor.selectionEnd;
+		annotateEditor.setRangeText("  ", start, end, "end");
+	}
+});
 searchInput.addEventListener("input", () => {
 	clearTimeout(searchTimer);
 	searchTimer = setTimeout(runSearch, 250);
@@ -625,8 +893,6 @@ document.querySelectorAll("[data-view]").forEach((button) => {
 });
 
 newFileForm.addEventListener("submit", (event) => {
-	const submitter = event.submitter;
-	if (!submitter || submitter.value === "cancel") return;
 	event.preventDefault();
 	let requested = newFileName.value.trim();
 	if (!requested) return;
@@ -635,13 +901,24 @@ newFileForm.addEventListener("submit", (event) => {
 	createFile(requested);
 });
 
+document.querySelector("#cancelNewFile").addEventListener("click", () => {
+	newFileDialog.close();
+});
+
 window.addEventListener("keydown", (event) => {
+	if (event.key === "Escape" && !fileMenu.hidden) {
+		event.preventDefault();
+		setFileMenuOpen(false);
+		fileMenuButton.focus();
+		return;
+	}
 	const mod = event.ctrlKey || event.metaKey;
 	if (!mod) return;
 	const key = event.key.toLowerCase();
 	if (key === "o") {
 		event.preventDefault();
-		chooseWorkspace();
+		if (event.shiftKey) chooseDocument();
+		else chooseWorkspace();
 	}
 	if (key === "s") {
 		event.preventDefault();
@@ -650,6 +927,10 @@ window.addEventListener("keydown", (event) => {
 	if (key === "n") {
 		event.preventDefault();
 		document.querySelector("#newFile").click();
+	}
+	if (key === "r") {
+		event.preventDefault();
+		refreshTree();
 	}
 	if (key === "b") {
 		event.preventDefault();
