@@ -111,6 +111,17 @@ CLI 需要提供 `profile check ace-writing` 和
 `gateway turn --surface stillwrite --profile ace-writing`，请求/响应使用单行 JSON
 并校验 workspace、tenant、user、thread 的 routing identity。
 
+## v0.6 原型：Ambient Related / 关联
+
+`关联` = 当前作品周围的静默本地材料准备。
+
+- 在可编辑的 Workspace Markdown 文档中写下标题或开头后，StillWrite 会从 H1、文件名和（标题信号不足时的）首段提取 3–6 个关键词/短语，分别检索 Workspace / Library，并按多关键词共现、短语命中和标题命中重排，最多展示 5 条材料。
+- 关联使用独立的 trigram 侧车索引；普通手工搜索仍保留原有 unicode61 语义，二字中文关键词另有正文 LIKE 兜底。
+- 结果出现在右侧支持栏的 `关联` 视图，分类为 `过去的批注`、`工作区` 和 `资料`；普通后台刷新不自动打开面板、不抢焦点、不改写正文，点击结果后才打开原始材料。
+- 在写作区或阅读区选中字句/段落后，浮层提供 `批注`、`问 Agent` 和 `＋关联`；`＋关联` 会把选区作为当前作品的临时检索补充，最多保留最近 3 个选区，并立即展示更新后的关联材料。
+- 关联只使用本地搜索和现有 Markdown / 索引，不调用模型、不访问网络、不自动写入文档，也不产生持久化关系数据。
+- Library 结果可以由用户显式加入当前 `引用`；关联本身不会自动加入引用篮。查看 Library 或 Agent Work 时，关联结果会清空。
+
 ## 为什么不是单 HTML `file://`
 
 浏览器的目录读写 API 仍受安全上下文和兼容性限制。Stillwrite 使用 Tauri 的桌面 WebView + Rust 文件层，前端文件直接嵌入桌面应用，不需要浏览器目录授权模型。
@@ -207,7 +218,7 @@ stillwrite/
 │   ├── annotations.test.js # 批注格式与锚点单元测试
 │   ├── document-links.js # URL 与项目内 Markdown 名称/路径识别和跳转
 │   ├── document-links.test.js # 内外链接识别与相对路径解析测试
-│   ├── app.js          # 文件树、Library、搜索、引用篮、同步、预览、布局、批注
+│   ├── app.js          # 文件树、Library、搜索、关联、引用篮、同步、预览、布局、批注
 │   └── style.css       # 沉浸式双栏视觉 + 批注栏 + 资料库
 └── src-tauri/
     ├── src/lib.rs      # 文件夹/文档选择 + 工作区边界 + 文件读写 + Tauri command 注册

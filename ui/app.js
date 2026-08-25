@@ -36,6 +36,8 @@ const fileMenuRoot = document.querySelector("#fileMenuRoot");
 const fileMenuButton = document.querySelector("#fileMenuButton");
 const fileMenu = document.querySelector("#fileMenu");
 const annotationButton = document.querySelector("#annotationButton");
+const relatedButton = document.querySelector("#relatedButton");
+const relatedToolbarCount = document.querySelector("#relatedToolbarCount");
 const annotatePanel = document.querySelector("#annotatePanel");
 const annotateHandle = document.querySelector("#annotateHandle");
 const closeAnnotate = document.querySelector("#closeAnnotate");
@@ -44,8 +46,13 @@ const aggregateMenu = document.querySelector("#aggregateMenu");
 const annotateDocName = document.querySelector("#annotateDocName");
 const annotateDocPath = document.querySelector("#annotateDocPath");
 const annotateCount = document.querySelector("#annotateCount");
+const relatedCount = document.querySelector("#relatedCount");
+const annotationViewButton = document.querySelector("#annotationViewButton");
+const relatedViewButton = document.querySelector("#relatedViewButton");
 const annotateHint = document.querySelector("#annotateHint");
 const annotateStream = document.querySelector("#annotateStream");
+const relatedStream = document.querySelector("#relatedStream");
+const annotateFooter = document.querySelector("#annotateFooter");
 const annotationList = document.querySelector("#annotationList");
 const annotationEmpty = document.querySelector("#annotationEmpty");
 const annotateComposer = document.querySelector("#annotateComposer");
@@ -57,6 +64,7 @@ const cancelAnnotationButton = document.querySelector("#cancelAnnotation");
 const selectionActions = document.querySelector("#selectionActions");
 const selectionAnnotateButton = document.querySelector("#selectionAnnotate");
 const selectionAgentButton = document.querySelector("#selectionAgent");
+const selectionRelatedButton = document.querySelector("#selectionRelated");
 const annotateSaveState = document.querySelector("#annotateSaveState");
 const annotateFoot = document.querySelector("#annotateFoot");
 const AnnotationCodec = window.StillwriteAnnotations;
@@ -108,6 +116,13 @@ let annotateTimer = null;
 let activeAnnotationId = null;
 let pendingAnnotation = null;
 let pendingPreviewSelection = null;
+let supportView = "annotation";
+let relatedItems = [];
+let relatedTimer = null;
+let relatedRequestToken = 0;
+let relatedSeedFingerprint = "";
+let relatedHasSearched = false;
+let relatedSupplementSeeds = [];
 
 const DEFAULT_REMOTE = "user@example.invalid:~/stillwrite.git";
 let autoSync = false; // 首次手动同步成功后开启自动同步
@@ -200,6 +215,647 @@ function libraryRefFor(hit, document = hit) {
 		relativePath: document.relative_path,
 		contentHash: document.content_hash,
 	};
+}
+
+function isWorkspaceDocumentForRelated() {
+	return Boolean(
+		currentFile &&
+		!currentLibraryDocument &&
+		!currentAgentDocument &&
+		!libraryMode &&
+		!agentMode,
+	);
+}
+
+function relatedText(value) {
+	return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function relatedKey(value) {
+	return relatedText(value).normalize("NFKC").toLowerCase();
+}
+
+function relatedPath(value) {
+	return String(value || "")
+		.replaceAll("\\", "/")
+		.replace(/\/+/g, "/")
+		.replace(/\/\.\//g, "/")
+		.replace(/\/$/, "");
+}
+
+function stripRelatedMarkdown(value) {
+	return relatedText(value)
+		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+		.replace(/[`*_~]/g, "")
+		.replace(/^\s*#{1,6}\s+/, "")
+		.replace(/^\s*>\s?/, "")
+		.trim();
+}
+
+function boundRelatedText(value, length = 100) {
+	const text = stripRelatedMarkdown(value);
+	return text.length > length ? `${text.slice(0, length)}…` : text;
+}
+
+const RELATED_STOPWORDS = new Set([
+	"a",
+	"an",
+	"and",
+	"are",
+	"as",
+	"at",
+	"be",
+	"but",
+	"by",
+	"can",
+	"do",
+	"does",
+	"for",
+	"from",
+	"how",
+	"in",
+	"into",
+	"is",
+	"it",
+	"of",
+	"on",
+	"or",
+	"that",
+	"the",
+	"this",
+	"to",
+	"was",
+	"what",
+	"when",
+	"where",
+	"why",
+	"with",
+	"we",
+	"you",
+	"为什么",
+	"如何",
+	"怎么",
+	"真正",
+	"改变的",
+	"不是",
+	"而是",
+	"这个",
+	"那个",
+	"关于",
+	"一种",
+	"我们",
+	"你们",
+	"他们",
+	"以及",
+	"还是",
+	"到底",
+	"来自",
+	"用于",
+	"可以",
+	"能够",
+	"正在",
+	"成为",
+	"通过",
+	"已经",
+	"没有",
+	"所有",
+	"其中",
+	"应该",
+	"当前",
+	"回到",
+	"中",
+	"的",
+	"了",
+	"着",
+	"是",
+	"在",
+	"与",
+	"和",
+	"及",
+	"或",
+	"但",
+	"也",
+	"就",
+	"都",
+	"被",
+	"让",
+	"把",
+	"给",
+	"从",
+	"向",
+	"对",
+	"将",
+	"而",
+	"又",
+	"很",
+	"更",
+	"最",
+	"有",
+	"无",
+]);
+
+const RELATED_CJK_BOUNDARIES =
+	/为什么|如何|怎么|真正|改变的|不是|而是|这个|那个|关于|一种|我们|你们|他们|以及|还是|到底|来自|用于|可以|能够|正在|成为|通过|已经|没有|所有|其中|应该|当前|回到|中|的|了|着|是|在|与|和|及|或|但|也|就|都|被|让|把|给|从|向|对|将|而|又|很|更|最|有|无/g;
+
+function isGenericRelatedFilename(value) {
+	return /^(?:untitled|new|document|markdown|note|notes|未命名|无标题|新建文档)(?:[-_ ]*\d+)?$/i.test(
+		relatedText(value),
+	);
+}
+
+function isRelatedKeyword(value) {
+	const key = relatedKey(value);
+	return Boolean(
+		key &&
+		!RELATED_STOPWORDS.has(key) &&
+		!(/^[a-z]$/i.test(key)) &&
+		!(/^[\u3400-\u4dbf\u4e00-\u9fff]$/.test(key)),
+	);
+}
+
+function addRelatedKeyword(map, query, source, weight, options = {}) {
+	const clean = relatedText(query);
+	const key = relatedKey(clean);
+	if (!isRelatedKeyword(clean)) return;
+	const existing = map.get(key);
+	if (existing) {
+		existing.isPhrase ||= Boolean(options.isPhrase);
+		existing.priority = Math.max(existing.priority, options.priority || 0);
+		return;
+	}
+	map.set(key, {
+		query: clean,
+		weight,
+		source,
+		isPhrase: Boolean(options.isPhrase),
+		priority: options.priority || 0,
+		order: map.size,
+	});
+}
+
+function relatedCjkSegments(run) {
+	return run
+		.split(RELATED_CJK_BOUNDARIES)
+		.map((part) => part.trim())
+		.filter((part) => part.length >= 2);
+}
+
+function extractRelatedKeywordCandidates(value, source, weight) {
+	const map = new Map();
+	const text = stripRelatedMarkdown(value);
+	const tokenPattern = /[A-Za-z][A-Za-z0-9+#._-]*|[\u3400-\u4dbf\u4e00-\u9fff]+/g;
+	for (const match of text.matchAll(tokenPattern)) {
+		const token = match[0];
+		if (/^[A-Za-z]/.test(token)) {
+			addRelatedKeyword(map, token, source, weight, {
+				priority: 96,
+			});
+			continue;
+		}
+		for (const segment of relatedCjkSegments(token)) {
+			if (segment.length <= 8) {
+				addRelatedKeyword(map, segment, source, weight, {
+					isPhrase: segment.length >= 3,
+					priority: 100 + segment.length,
+				});
+			} else {
+				for (let index = 0; index + 3 <= segment.length && index < 12; index += 2) {
+					addRelatedKeyword(map, segment.slice(index, index + 3), source, weight, {
+						isPhrase: true,
+						priority: 92 - index,
+					});
+				}
+			}
+			if (segment.length >= 4) {
+				const prefixLength = segment.length >= 5 ? 3 : 2;
+				addRelatedKeyword(map, segment.slice(0, prefixLength), source, weight, {
+					isPhrase: prefixLength >= 3,
+					priority: 88,
+				});
+				addRelatedKeyword(map, segment.slice(-2), source, weight, {
+					priority: 87,
+				});
+			}
+		}
+	}
+	return [...map.values()].sort(
+		(a, b) => b.priority - a.priority || a.order - b.order,
+	);
+}
+
+function firstRelatedParagraph(source) {
+	for (const block of source.split(/\n\s*\n/)) {
+		const paragraph = block
+			.split("\n")
+			.filter((line) => !/^\s*#{1,6}\s+/.test(line))
+			.join(" ");
+		const opening = boundRelatedText(paragraph);
+		if (opening) return opening;
+	}
+	return "";
+}
+
+function relatedSeedCandidates() {
+	if (!isWorkspaceDocumentForRelated()) return [];
+	const source = editor.value.replace(/\r\n?/g, "\n");
+	const h1Line = source
+		.split("\n")
+		.find((line) => /^\s{0,3}#\s+/.test(line));
+	const h1 = h1Line ? h1Line.replace(/^\s{0,3}#\s+/, "") : "";
+	const h1Candidates = extractRelatedKeywordCandidates(h1, "h1", 1);
+	const filename = basename(currentFile).replace(/\.(md|markdown)$/i, "");
+	const filenameCandidates =
+		filename && !isGenericRelatedFilename(filename)
+			? extractRelatedKeywordCandidates(filename, "filename", 0.6)
+			: [];
+	const titleCandidates = h1Candidates.length ? h1Candidates : filenameCandidates;
+	const supplementCandidates = relatedSupplementSeeds.flatMap((text, index) =>
+		extractRelatedKeywordCandidates(text, "selection", 1.2).map((candidate) => ({
+			...candidate,
+			priority: candidate.priority + 18 - index,
+		})),
+	);
+	const candidates = [
+		...supplementCandidates.slice(0, 4),
+		...titleCandidates.slice(0, 5),
+		...(h1Candidates.length ? filenameCandidates.slice(0, 2) : filenameCandidates.slice(5, 7)),
+	];
+
+	if (titleCandidates.length < 2) {
+		candidates.push(
+			...extractRelatedKeywordCandidates(
+				firstRelatedParagraph(source),
+				"paragraph",
+				0.35,
+			),
+		);
+	}
+
+	const english = h1Candidates.find((candidate) => /^[A-Za-z]/.test(candidate.query));
+	const cjkPhrase = h1Candidates
+		.filter(
+			(candidate) =>
+				/^[\u3400-\u4dbf\u4e00-\u9fff]/.test(candidate.query) &&
+				candidate.query.length >= 3,
+		)
+		.sort((a, b) => a.query.length - b.query.length)[0];
+	if (english && cjkPhrase) {
+		candidates.unshift({
+			query: `${english.query} ${cjkPhrase.query}`,
+			weight: 1,
+			source: "h1",
+			isPhrase: true,
+			priority: 120,
+			order: -1,
+		});
+	}
+
+	const seen = new Set();
+	return candidates.filter((candidate) => {
+		const key = relatedKey(candidate.query);
+		if (!key || seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	}).slice(0, 6);
+}
+
+function relatedFingerprint(candidates) {
+	return candidates.map((candidate) => relatedKey(candidate.query)).join("\u001f");
+}
+
+function renderRelatedToolbar() {
+	const count = relatedItems.length;
+	relatedToolbarCount.textContent = String(count);
+	relatedCount.textContent = String(count);
+	relatedButton.hidden = count === 0;
+}
+
+function setSupportView(view) {
+	supportView = view === "related" ? "related" : "annotation";
+	const related = supportView === "related";
+	annotationViewButton.classList.toggle("active", !related);
+	relatedViewButton.classList.toggle("active", related);
+	annotationViewButton.setAttribute("aria-selected", String(!related));
+	relatedViewButton.setAttribute("aria-selected", String(related));
+	newAnnotationButton.hidden = related;
+	annotateStream.hidden = related;
+	annotateFooter.hidden = related;
+	relatedStream.hidden = !related;
+	if (related) renderRelatedPanel();
+}
+
+function renderRelatedPanel() {
+	relatedStream.replaceChildren();
+	if (relatedSupplementSeeds.length) {
+		const note = document.createElement("div");
+		note.className = "related-supplement-note";
+		note.textContent = `已加入 ${relatedSupplementSeeds.length} 个选区作为关联线索`;
+		relatedStream.appendChild(note);
+	}
+	if (!relatedItems.length) {
+		const tip = document.createElement("div");
+		tip.className = "related-empty";
+		tip.textContent = relatedHasSearched
+			? "暂时没有找到明显相关的旧材料。"
+			: "写下标题或开头后，这里会出现与你当前作品相关的旧材料。";
+		relatedStream.appendChild(tip);
+		return;
+	}
+
+	const fragment = document.createDocumentFragment();
+	for (const item of relatedItems) {
+		const card = document.createElement("article");
+		card.className = "related-card";
+		const open = document.createElement("button");
+		open.type = "button";
+		open.className = "related-card-open";
+		const category = document.createElement("span");
+		category.className = "related-card-category";
+		category.textContent = item.category;
+		const title = document.createElement("strong");
+		title.className = "related-card-title";
+		title.textContent = item.title;
+		const snippet = document.createElement("span");
+		snippet.className = "related-card-snippet";
+		snippet.textContent = item.snippet || item.source;
+		const source = document.createElement("span");
+		source.className = "related-card-source";
+		source.textContent = item.source;
+		open.append(category, title, snippet, source);
+		open.addEventListener("click", () => void openRelatedItem(item));
+		card.appendChild(open);
+
+		if (item.kind === "library") {
+			const citation = document.createElement("label");
+			citation.className = "related-card-citation";
+			const checkbox = document.createElement("input");
+			checkbox.type = "checkbox";
+			checkbox.checked = citationBasket.has(item.raw.uri);
+			checkbox.title = "加入当前引用";
+			checkbox.addEventListener("change", () => {
+				if (checkbox.checked) citationBasket.set(item.raw.uri, item.raw);
+				else citationBasket.delete(item.raw.uri);
+				renderCitationSummary();
+			});
+			citation.append(checkbox, document.createTextNode("引用"));
+			card.appendChild(citation);
+		}
+		fragment.appendChild(card);
+	}
+	relatedStream.appendChild(fragment);
+}
+
+function clearRelated({ resetView = true } = {}) {
+	if (relatedTimer) {
+		clearTimeout(relatedTimer);
+		relatedTimer = null;
+	}
+	hideSelectionAnnotate();
+	relatedRequestToken += 1;
+	relatedItems = [];
+	relatedSeedFingerprint = "";
+	relatedHasSearched = false;
+	relatedSupplementSeeds = [];
+	renderRelatedToolbar();
+	if (resetView) setSupportView("annotation");
+	else renderRelatedPanel();
+}
+
+function addRelatedSupplement(value) {
+	if (!isWorkspaceDocumentForRelated()) return;
+	const clean = boundRelatedText(value, 240);
+	if (!clean) return;
+	const key = relatedKey(clean);
+	if (relatedTimer) {
+		clearTimeout(relatedTimer);
+		relatedTimer = null;
+	}
+	relatedRequestToken += 1;
+	relatedSupplementSeeds = [
+		clean,
+		...relatedSupplementSeeds.filter((seed) => relatedKey(seed) !== key),
+	].slice(0, 3);
+	relatedItems = [];
+	relatedSeedFingerprint = "";
+	relatedHasSearched = false;
+	renderRelatedToolbar();
+	setAnnotateVisible(true);
+	setSupportView("related");
+	scheduleRelatedRefresh(0);
+}
+
+function scheduleRelatedRefresh(delay = 1200) {
+	if (relatedTimer) clearTimeout(relatedTimer);
+	relatedRequestToken += 1;
+	const token = relatedRequestToken;
+	relatedTimer = setTimeout(() => {
+		relatedTimer = null;
+		if (token === relatedRequestToken) void refreshRelated();
+	}, delay);
+}
+
+async function searchRelatedPlane(command, candidate) {
+	try {
+		const hits = await invoke(command, { query: candidate.query, limit: 8 });
+		return Array.isArray(hits) ? hits : [];
+	} catch (error) {
+		console.warn("关联搜索失败", command, candidate.query, error);
+		return [];
+	}
+}
+
+function relatedWorkspaceRelativePath(path) {
+	return relatedPath(relativeDocumentPath(path));
+}
+
+function isExcludedRelatedWorkspacePath(path) {
+	const normalized = relatedPath(path);
+	const relative = relatedWorkspaceRelativePath(path);
+	const current = relatedPath(currentFile);
+	const currentRelative = relatedWorkspaceRelativePath(currentFile);
+	const currentAnnotation = currentRelative.startsWith("批注/")
+		? ""
+		: relatedPath(`${rootPath}/批注/${currentRelative}`);
+	return (
+		normalized === current ||
+		normalized === currentAnnotation ||
+		relative === "批注汇总.md" ||
+		relative.endsWith("/批注汇总.md")
+	);
+}
+
+function relatedTitleMatches(hit, candidate) {
+	const title = relatedKey(hit.title);
+	const terms = relatedKey(candidate.query).split(/\s+/).filter(Boolean);
+	return terms.length > 0 && terms.every((term) => title.includes(term));
+}
+
+function relatedEvidence(hit, candidate, rank) {
+	const titleMatch = relatedTitleMatches(hit, candidate);
+	return {
+		keywordKey: relatedKey(candidate.query),
+		titleMatch,
+		score:
+			candidate.weight +
+			(titleMatch ? 2 : 0) +
+			(candidate.isPhrase ? 2 : 0) +
+			0.1 / (rank + 1),
+	};
+}
+
+function normalizeRelatedWorkspaceHit(hit, candidate, rank) {
+	if (!hit?.path || isExcludedRelatedWorkspacePath(hit.path)) return null;
+	const relative = relatedWorkspaceRelativePath(hit.path);
+	const annotation = relative === "批注" || relative.startsWith("批注/");
+	const evidence = relatedEvidence(hit, candidate, rank);
+	return {
+		key: `workspace:${relatedPath(hit.path)}`,
+		kind: annotation ? "annotation" : "workspace",
+		category: annotation ? "过去的批注" : "工作区",
+		title: hit.title || basename(hit.path),
+		snippet: relatedText(hit.snippet),
+		source: `${annotation ? "批注" : "工作区"} · ${relative}`,
+		path: hit.path,
+		raw: hit,
+		score: evidence.score,
+		keywordKey: evidence.keywordKey,
+		matchedQueries: new Set([evidence.keywordKey]),
+		titleMatches: evidence.titleMatch ? 1 : 0,
+		phraseMatches: candidate.isPhrase ? 1 : 0,
+	};
+}
+
+function normalizeRelatedLibraryHit(hit, candidate, rank) {
+	if (!hit?.uri) return null;
+	const evidence = relatedEvidence(hit, candidate, rank);
+	return {
+		key: `library:${hit.uri}`,
+		kind: "library",
+		category: "资料",
+		title: hit.title || hit.relative_path || hit.uri,
+		snippet: relatedText(hit.snippet),
+		source: `${hit.source_name || "资料"} · ${hit.relative_path || hit.uri}`,
+		raw: hit,
+		score: evidence.score,
+		keywordKey: evidence.keywordKey,
+		matchedQueries: new Set([evidence.keywordKey]),
+		titleMatches: evidence.titleMatch ? 1 : 0,
+		phraseMatches: candidate.isPhrase ? 1 : 0,
+	};
+}
+
+function mergeRelatedHits(batches) {
+	const merged = new Map();
+	let order = 0;
+	for (const batch of batches) {
+		batch.hits.forEach((hit, rank) => {
+			const item = batch.plane === "workspace"
+				? normalizeRelatedWorkspaceHit(hit, batch.candidate, rank)
+				: normalizeRelatedLibraryHit(hit, batch.candidate, rank);
+			if (!item) return;
+			const existing = merged.get(item.key);
+			if (existing) {
+				if (!existing.matchedQueries.has(item.keywordKey)) {
+					existing.score += item.score;
+					existing.matchedQueries.add(item.keywordKey);
+					existing.titleMatches += item.titleMatches;
+					existing.phraseMatches += item.phraseMatches;
+				}
+			} else {
+				item.order = order;
+				order += 1;
+				merged.set(item.key, item);
+			}
+		});
+	}
+
+	const categoryOrder = { annotation: 0, workspace: 1, library: 2 };
+	return [...merged.values()]
+		.sort((a, b) =>
+			b.score - a.score ||
+			b.matchedQueries.size - a.matchedQueries.size ||
+			b.phraseMatches - a.phraseMatches ||
+			b.titleMatches - a.titleMatches ||
+			categoryOrder[a.kind] - categoryOrder[b.kind] ||
+			a.title.localeCompare(b.title, "zh-CN") ||
+			a.source.localeCompare(b.source, "zh-CN") ||
+			a.order - b.order,
+		)
+		.slice(0, 5);
+}
+
+async function refreshRelated() {
+	const token = relatedRequestToken;
+	if (!isWorkspaceDocumentForRelated()) return;
+	const candidates = relatedSeedCandidates();
+	const fingerprint = relatedFingerprint(candidates);
+	if (fingerprint === relatedSeedFingerprint) return;
+	relatedSeedFingerprint = fingerprint;
+	if (!candidates.length) {
+		relatedItems = [];
+		relatedHasSearched = false;
+		renderRelatedToolbar();
+		renderRelatedPanel();
+		return;
+	}
+
+	const batches = await Promise.all(
+		candidates.flatMap((candidate) => [
+				searchRelatedPlane("search_related_index", candidate).then((hits) => ({
+				candidate,
+				plane: "workspace",
+				hits,
+			})),
+				searchRelatedPlane("search_related_library", candidate).then((hits) => ({
+				candidate,
+				plane: "library",
+				hits,
+			})),
+		]),
+	);
+	if (token !== relatedRequestToken || !isWorkspaceDocumentForRelated()) return;
+	relatedItems = mergeRelatedHits(batches);
+	relatedHasSearched = true;
+	renderRelatedToolbar();
+	renderRelatedPanel();
+}
+
+function workspacePathExists(path) {
+	const target = relatedPath(path);
+	function visit(nodes) {
+		for (const node of nodes || []) {
+			if (node.is_dir && visit(node.children)) return true;
+			if (!node.is_dir && relatedPath(node.path) === target) return true;
+		}
+		return false;
+	}
+	return visit(lastTreeNodes);
+}
+
+function annotationSourcePath(sidecarPath) {
+	if (!rootPath) return null;
+	const relative = relatedWorkspaceRelativePath(sidecarPath);
+	if (!relative.startsWith("批注/")) return null;
+	const sourceRelative = relative.slice("批注/".length);
+	if (!sourceRelative || sourceRelative === "批注汇总.md") return null;
+	const root = relatedPath(rootPath);
+	const sourcePath = `${root}/${sourceRelative}`;
+	return workspacePathExists(sourcePath) ? sourcePath : null;
+}
+
+async function openRelatedItem(item) {
+	if (item.kind === "library") {
+		await openLibraryDocument(item.raw);
+		return;
+	}
+	if (item.kind === "annotation") {
+		const sourcePath = annotationSourcePath(item.path) || item.path;
+		await openFile(sourcePath, basename(sourcePath), null);
+		setSupportView("annotation");
+		setAnnotateVisible(true);
+		return;
+	}
+	await openFile(item.path, basename(item.path), null);
 }
 
 function renderCitationSummary() {
@@ -751,6 +1407,8 @@ async function setSidebarMode(mode) {
 			: "搜索全文（FTS）…";
 	searchInput.value = "";
 	clearTimeout(searchTimer);
+	if (libraryMode || agentMode) clearRelated();
+	else if (isWorkspaceDocumentForRelated()) scheduleRelatedRefresh(0);
 	renderCitationSummary();
 	if (libraryMode) {
 		if (!librarySources.length) await refreshLibrary();
@@ -770,6 +1428,7 @@ async function useWorkspace(data) {
 	if (workspaceChanged) {
 		citationBasket.clear();
 		renderCitationSummary();
+		clearRelated();
 	}
 	editor.readOnly = false;
 	editor.classList.remove("readonly");
@@ -872,6 +1531,7 @@ async function openFile(path, name, row) {
 }
 
 async function openLibraryDocument(hit) {
+	clearRelated();
 	const token = ++loadToken;
 	await saveCurrent();
 	if (annotateDirty) await saveAnnotate();
@@ -906,6 +1566,7 @@ async function openLibraryDocument(hit) {
 }
 
 function showDocument(path, name, text, row) {
+	clearRelated();
 	currentFile = path;
 	currentLibraryDocument = null;
 	currentAgentDocument = null;
@@ -926,6 +1587,7 @@ function showDocument(path, name, text, row) {
 	previewEl.scrollTop = 0;
 	markSaved();
 	loadAnnotationPanel();
+	scheduleRelatedRefresh(0);
 }
 
 function renderAgentWorks(items = allAgentWorkItems()) {
@@ -1024,6 +1686,7 @@ async function openAgentWork(item) {
 }
 
 function showAgentDocument(data) {
+	clearRelated();
 	currentAgentDocument = data;
 	currentFile = null;
 	currentLibraryDocument = null;
@@ -1339,6 +2002,14 @@ function captureEditorAnnotation() {
 		editor.selectionStart,
 		editor.selectionEnd,
 	);
+	return range.quote.trim() ? range : null;
+}
+
+function captureEditorSelection() {
+	const start = editor.selectionStart;
+	const end = editor.selectionEnd;
+	if (!(end > start)) return null;
+	const range = AnnotationCodec.selectionOrParagraph(editor.value, start, end);
 	return range.quote.trim() ? range : null;
 }
 
@@ -1679,6 +2350,26 @@ function hideSelectionAnnotate() {
 	pendingPreviewSelection = null;
 }
 
+function positionSelectionActions(rect, { below = false } = {}) {
+	selectionActions.hidden = false;
+	const bounds = selectionActions.getBoundingClientRect();
+	const width = bounds.width || 260;
+	const height = bounds.height || 34;
+	const maxLeft = Math.max(8, window.innerWidth - width - 8);
+	const maxTop = Math.max(8, window.innerHeight - height - 8);
+	const left = Math.min(
+		maxLeft,
+		Math.max(8, rect.left + rect.width / 2 - width / 2),
+	);
+	const desiredTop = below ? rect.top + 12 : rect.top - height - 8;
+	const top = Math.min(
+		maxTop,
+		Math.max(8, desiredTop),
+	);
+	selectionActions.style.left = `${left}px`;
+	selectionActions.style.top = `${top}px`;
+}
+
 function sourceRangeForPreviewSelection(quote) {
 	const exact = editor.value.indexOf(quote);
 	if (exact >= 0)
@@ -1707,10 +2398,21 @@ function showPreviewSelectionAction() {
 		return;
 	}
 	pendingPreviewSelection = sourceRangeForPreviewSelection(quote);
+	selectionRelatedButton.hidden = !isWorkspaceDocumentForRelated();
 	const rect = range.getBoundingClientRect();
-	selectionActions.style.left = `${Math.min(window.innerWidth - 180, Math.max(8, rect.left + rect.width / 2 - 78))}px`;
-	selectionActions.style.top = `${Math.max(8, rect.top - 42)}px`;
-	selectionActions.hidden = false;
+	positionSelectionActions(rect);
+}
+
+function showEditorSelectionAction() {
+	const range = captureEditorSelection();
+	if (!range || range.quote.length > 4000) {
+		hideSelectionAnnotate();
+		return;
+	}
+	pendingPreviewSelection = range;
+	selectionRelatedButton.hidden = !isWorkspaceDocumentForRelated();
+	const rect = editor.getBoundingClientRect();
+	positionSelectionActions(rect, { below: true });
 }
 
 // 源文档是否允许批注（批注文件与汇总文件自身不能再批注）
@@ -1760,7 +2462,7 @@ async function doAggregateAnnotations() {
 
 function updateRightPanelHandle() {
 	annotateHandle.classList.toggle("hidden", !annotateVisible);
-	annotateHandle.title = "拖动调整批注栏";
+	annotateHandle.title = "拖动调整支持栏";
 }
 
 function setAnnotateVisible(visible) {
@@ -2024,7 +2726,11 @@ editor.addEventListener("input", () => {
 	schedulePreview();
 	markDirty();
 	scheduleSave();
+	if (isWorkspaceDocumentForRelated()) scheduleRelatedRefresh();
+	setTimeout(showEditorSelectionAction);
 });
+
+editor.addEventListener("select", () => setTimeout(showEditorSelectionAction));
 
 editor.addEventListener("keydown", (event) => {
 	if (editor.readOnly) return;
@@ -2078,6 +2784,12 @@ document.querySelector("#newFile").addEventListener("click", async () => {
 
 document.querySelector("#syncButton").addEventListener("click", doSync);
 askAgentButton.addEventListener("click", () => void beginAgentQuestion());
+relatedButton.addEventListener("click", () => {
+	setAnnotateVisible(true);
+	setSupportView("related");
+});
+annotationViewButton.addEventListener("click", () => setSupportView("annotation"));
+relatedViewButton.addEventListener("click", () => setSupportView("related"));
 agentAskForm.addEventListener("submit", submitAgentQuestion);
 agentAskCancel.addEventListener("click", () => {
 	pendingAgentRequest = null;
@@ -2130,6 +2842,9 @@ selectionAnnotateButton.addEventListener("pointerdown", (event) => {
 selectionAgentButton.addEventListener("pointerdown", (event) => {
 	event.preventDefault();
 });
+selectionRelatedButton.addEventListener("pointerdown", (event) => {
+	event.preventDefault();
+});
 selectionAnnotateButton.addEventListener("click", () => {
 	const range = pendingPreviewSelection;
 	hideSelectionAnnotate();
@@ -2139,6 +2854,11 @@ selectionAgentButton.addEventListener("click", () => {
 	const range = pendingPreviewSelection;
 	hideSelectionAnnotate();
 	if (range) void beginAgentQuestion(range);
+});
+selectionRelatedButton.addEventListener("click", () => {
+	const range = pendingPreviewSelection;
+	hideSelectionAnnotate();
+	if (range) addRelatedSupplement(range.quote);
 });
 document.addEventListener("pointerdown", (event) => {
 	if (

@@ -575,6 +575,10 @@ body.resizing .resize-handle::after {
 	background: #eee3cd;
 	color: #6c5127;
 }
+.related-btn {
+	color: #684b28;
+	font-weight: 600;
+}
 .annotate-panel {
 	width: var(--annotate-width);
 	flex: 0 0 var(--annotate-width);
@@ -613,6 +617,29 @@ body.resizing .resize-handle::after {
 	font-weight: 600;
 	letter-spacing: 0.04em;
 	color: var(--ink);
+}
+.support-view-tabs {
+	gap: 3px;
+}
+.support-view-tab {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	height: 30px;
+	padding: 0 4px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--muted);
+	font: inherit;
+	cursor: pointer;
+}
+.support-view-tab:hover {
+	background: var(--hover);
+}
+.support-view-tab.active {
+	background: #eee3cd;
+	color: #6c5127;
 }
 .annotate-count {
 	display: inline-grid;
@@ -653,6 +680,112 @@ body.resizing .resize-handle::after {
 	min-height: 0;
 	overflow-y: auto;
 	padding: 0 12px 18px;
+}
+.related-stream {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 12px;
+	background: #f7f3eb;
+}
+.related-stream[hidden] {
+	display: none;
+}
+.related-empty {
+	min-height: 210px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+	color: #5b534a;
+	font-size: 12px;
+	line-height: 1.6;
+	text-align: center;
+}
+.related-supplement-note {
+	margin-bottom: 10px;
+	padding: 8px 10px;
+	border: 1px solid #d8c8ae;
+	border-radius: 8px;
+	background: #eee5d6;
+	color: #604b31;
+	font-size: 11px;
+	line-height: 1.5;
+}
+.related-card {
+	margin-bottom: 9px;
+	border: 1px solid #d4c6b2;
+	border-radius: 10px;
+	background: #fffdf9;
+	box-shadow: 0 2px 8px rgba(60, 47, 31, 0.06);
+	overflow: hidden;
+}
+.related-card:last-child {
+	margin-bottom: 0;
+}
+.related-card-open {
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 5px;
+	padding: 11px 12px 9px;
+	border: 0;
+	background: transparent;
+	color: #292723;
+	text-align: left;
+	cursor: pointer;
+}
+.related-card-open:hover {
+	background: #f8f0e3;
+}
+.related-card-category {
+	color: #6a4d2a;
+	font-size: 9px;
+	font-weight: 700;
+	letter-spacing: 0.05em;
+}
+.related-card-title {
+	width: 100%;
+	overflow: hidden;
+	color: #292723;
+	font-size: 13px;
+	font-weight: 600;
+	line-height: 1.4;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.related-card-snippet {
+	display: -webkit-box;
+	width: 100%;
+	overflow: hidden;
+	color: #4c453d;
+	font-family: ui-serif, Georgia, "Noto Serif CJK SC", serif;
+	font-size: 12px;
+	line-height: 1.62;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
+}
+.related-card-source {
+	width: 100%;
+	overflow: hidden;
+	color: #6c6257;
+	font-size: 10px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.related-card-citation {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 6px 12px 8px;
+	border-top: 1px solid #e0d5c5;
+	background: #fbf6ee;
+	color: #5b5045;
+	font-size: 11px;
+}
+.related-card-citation input {
+	accent-color: #87633a;
 }
 .annotate-stream-meta {
 	min-height: 38px;
@@ -923,7 +1056,8 @@ body.resizing .resize-handle::after {
 	display: none;
 }
 .selection-annotate,
-.selection-agent {
+.selection-agent,
+.selection-related {
 	height: 30px;
 	padding: 0 10px;
 	border: 0;
@@ -934,7 +1068,8 @@ body.resizing .resize-handle::after {
 	cursor: pointer;
 }
 .selection-annotate:hover,
-.selection-agent:hover {
+.selection-agent:hover,
+.selection-related:hover {
 	background: rgba(255, 255, 255, 0.14);
 }
 
@@ -1292,6 +1427,52 @@ kbd {
 	}
 	.annotate-panel {
 		background: #1b1b19;
+	}
+	.related-stream {
+		background: #1b1b19;
+	}
+	.related-empty {
+		color: #bcb5ab;
+	}
+	.related-supplement-note {
+		border-color: #5a4b36;
+		background: #332d24;
+		color: #dfc99e;
+	}
+	.related-card {
+		border-color: #4c4740;
+		background: #24231f;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+	}
+	.related-card-open {
+		color: #e4dfd7;
+	}
+	.related-card-open:hover {
+		background: #2d2a25;
+	}
+	.related-card-category {
+		color: #d4b87f;
+	}
+	.related-card-title {
+		color: #e7e2da;
+	}
+	.related-card-snippet {
+		color: #c7c0b6;
+	}
+	.related-card-source {
+		color: #aaa299;
+	}
+	.related-card-citation {
+		border-top-color: #45413a;
+		background: #2a2823;
+		color: #c1b9ae;
+	}
+	.related-btn {
+		color: #d6bd8f;
+	}
+	.support-view-tab.active {
+		background: #3a3327;
+		color: #e3c994;
 	}
 	.annotate-composer,
 	.annotation-card,

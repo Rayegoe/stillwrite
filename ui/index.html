@@ -78,6 +78,14 @@
           >
             ＋ 批注
           </button>
+          <button
+            class="text-btn related-btn"
+            id="relatedButton"
+            title="查看当前作品的关联材料"
+            hidden
+          >
+            关联 <span id="relatedToolbarCount">0</span>
+          </button>
           <div class="segmented" aria-label="视图模式">
             <button data-view="editor" title="仅写作 (Ctrl+1)">写</button>
             <button class="active" data-view="split" title="双栏 (Ctrl+2)">
@@ -175,13 +183,32 @@
         <div
           class="resize-handle annotate-handle"
           id="annotateHandle"
-          title="拖动调整批注栏"
+          title="拖动调整支持栏"
         ></div>
         <section class="annotate-panel" id="annotatePanel" hidden>
           <div class="annotate-head">
-            <span class="annotate-title">
-              批注 <span class="annotate-count" id="annotateCount">0</span>
-            </span>
+            <div class="annotate-title support-view-tabs" role="tablist" aria-label="支持视图">
+              <button
+                class="support-view-tab active"
+                id="annotationViewButton"
+                type="button"
+                role="tab"
+                aria-selected="true"
+                aria-controls="annotateStream"
+              >
+                批注 <span class="annotate-count" id="annotateCount">0</span>
+              </button>
+              <button
+                class="support-view-tab"
+                id="relatedViewButton"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="relatedStream"
+              >
+                关联 <span class="annotate-count" id="relatedCount">0</span>
+              </button>
+            </div>
             <div class="annotate-actions">
               <button
                 class="text-btn"
@@ -229,7 +256,8 @@
             </div>
             <div class="annotation-list" id="annotationList" role="list"></div>
           </div>
-          <div class="annotate-foot">
+          <div class="related-stream" id="relatedStream" hidden></div>
+          <div class="annotate-foot" id="annotateFooter">
             <span id="annotateFoot">批注保存在「批注/」，随文档同步。</span>
             <button class="annotate-foot-action" id="aggregateButton" type="button">
               汇总全部
@@ -286,6 +314,14 @@
       </button>
       <button class="selection-agent" id="selectionAgent" type="button">
         问 Agent
+      </button>
+      <button
+        class="selection-related"
+        id="selectionRelated"
+        type="button"
+        title="把当前选区加入关联检索"
+      >
+        ＋ 关联
       </button>
     </div>
 

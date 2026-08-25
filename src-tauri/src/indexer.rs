@@ -1,7 +1,7 @@
 //! 本地 SQLite 侧车索引：文件仍是唯一内容源，这里只存派生的搜索/元数据。
 //! 索引放在应用数据目录，不进入工作区、不参与 git 同步，任何时刻可重建。
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ pub struct SearchHit {
 }
 
 pub fn open_index(db_path: &Path) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(db_path)?;
+    let mut conn = Connection::open(db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS files (
@@ -28,8 +28,41 @@ pub fn open_index(db_path: &Path) -> rusqlite::Result<Connection> {
         CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
             path UNINDEXED, title, body,
             tokenize = 'unicode61'
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS related_fts USING fts5(
+            path UNINDEXED, title, body,
+            tokenize = 'trigram'
+        );
+        CREATE TABLE IF NOT EXISTS related_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );",
     )?;
+
+    let related_ready: Option<String> = conn
+        .query_row(
+            "SELECT value FROM related_meta WHERE key = 'backfilled'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if related_ready.as_deref() != Some("1") {
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO related_fts (path, title, body)
+             SELECT f.path, f.title, f.body
+             FROM fts f
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM related_fts r WHERE r.path = f.path
+             )",
+            [],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO related_meta (key, value) VALUES ('backfilled', '1')",
+            [],
+        )?;
+        tx.commit()?;
+    }
     Ok(conn)
 }
 
@@ -137,6 +170,12 @@ pub fn build_index(conn: &mut Connection, root: &Path) -> Result<(usize, usize),
         let mut del_fts = tx
             .prepare("DELETE FROM fts WHERE path = ?1")
             .map_err(|e| format!("索引准备失败: {e}"))?;
+        let mut upsert_related_fts = tx
+            .prepare("INSERT INTO related_fts (path, title, body) VALUES (?1, ?2, ?3)")
+            .map_err(|e| format!("索引准备失败: {e}"))?;
+        let mut del_related_fts = tx
+            .prepare("DELETE FROM related_fts WHERE path = ?1")
+            .map_err(|e| format!("索引准备失败: {e}"))?;
 
         for (path, mtime, size) in &files {
             let rel = path
@@ -176,6 +215,12 @@ pub fn build_index(conn: &mut Connection, root: &Path) -> Result<(usize, usize),
             upsert_fts
                 .execute(params![rel, title, text])
                 .map_err(|e| format!("索引写入失败: {e}"))?;
+            del_related_fts
+                .execute(params![rel])
+                .map_err(|e| format!("索引写入失败: {e}"))?;
+            upsert_related_fts
+                .execute(params![rel, title, text])
+                .map_err(|e| format!("索引写入失败: {e}"))?;
             updated += 1;
         }
 
@@ -194,6 +239,9 @@ pub fn build_index(conn: &mut Connection, root: &Path) -> Result<(usize, usize),
                 tx.execute("DELETE FROM files WHERE path = ?1", params![rel])
                     .map_err(|e| format!("索引清理失败: {e}"))?;
                 del_fts
+                    .execute(params![rel])
+                    .map_err(|e| format!("索引清理失败: {e}"))?;
+                del_related_fts
                     .execute(params![rel])
                     .map_err(|e| format!("索引清理失败: {e}"))?;
                 removed += 1;
@@ -243,6 +291,13 @@ pub fn index_single(conn: &mut Connection, root: &Path, path: &Path) -> Result<(
         params![rel, title, text],
     )
     .map_err(|e| format!("索引写入失败: {e}"))?;
+    tx.execute("DELETE FROM related_fts WHERE path = ?1", params![rel])
+        .map_err(|e| format!("索引写入失败: {e}"))?;
+    tx.execute(
+        "INSERT INTO related_fts (path, title, body) VALUES (?1, ?2, ?3)",
+        params![rel, title, text],
+    )
+    .map_err(|e| format!("索引写入失败: {e}"))?;
     tx.commit().map_err(|e| format!("索引提交失败: {e}"))?;
     Ok(())
 }
@@ -277,7 +332,7 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Search
         .filter_map(|r| r.ok())
         .collect();
 
-    // MATCH 语法错误时降级为 LIKE
+    // 保持普通 Workspace 搜索的原有降级行为。
     if hits.is_empty() {
         if let Ok(mut like_stmt) = conn.prepare(
             "SELECT path, title, snippet FROM files WHERE title LIKE ?1 OR snippet LIKE ?1 LIMIT ?2",
@@ -297,6 +352,65 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Search
                     return Ok(like_hits);
                 }
             }
+        }
+    }
+    Ok(hits)
+}
+
+/// Related 专用的 trigram 检索；普通手工搜索继续使用 unicode61 的 `search`。
+pub fn search_related(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<SearchHit>, String> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect();
+    let match_expr = tokens.join(" AND ");
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, title, snippet(related_fts, 2, '[[', ']]', '…', 14)
+             FROM related_fts WHERE related_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+        )
+        .map_err(|e| format!("关联搜索准备失败: {e}"))?;
+    let hits: Vec<SearchHit> = stmt
+        .query_map(params![match_expr, limit as i64], |row| {
+            Ok(SearchHit {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                snippet: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("关联搜索失败: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if hits.is_empty() {
+        let mut like_stmt = conn
+            .prepare(
+                "SELECT r.path, r.title, COALESCE(f.snippet, '')
+                 FROM related_fts r LEFT JOIN files f ON f.path = r.path
+                 WHERE r.title LIKE ?1 OR r.body LIKE ?1 LIMIT ?2",
+            )
+            .map_err(|e| format!("关联搜索准备失败: {e}"))?;
+        let like_hits: Vec<SearchHit> = like_stmt
+            .query_map(params![format!("%{}%", query.trim()), limit as i64], |row| {
+                Ok(SearchHit {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                    snippet: row.get(2)?,
+                })
+            })
+            .map_err(|e| format!("关联搜索失败: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        if !like_hits.is_empty() {
+            return Ok(like_hits);
         }
     }
     Ok(hits)
@@ -370,6 +484,56 @@ mod tests {
         let (_, removed2) = build_index(&mut conn, &root).unwrap();
         assert_eq!(removed2, 1);
         assert!(search(&conn, "毛泽东", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn trigram_retrieves_chinese_substrings_and_two_character_terms() {
+        let (_keep, root) = temp_workspace();
+        let db = root.join("test-index.db");
+        std::fs::write(
+            root.join("context.md"),
+            "# 上下文工程\n\n上下文工程正在成为 Agent Harness 的核心问题，模型能力也会因此重新分层。\n",
+        )
+        .unwrap();
+
+        let mut conn = open_index(&db).unwrap();
+        build_index(&mut conn, &root).unwrap();
+
+        for query in ["上下文", "上下文工程", "模型", "Harness"] {
+            let hits = search_related(&conn, query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "query={query}");
+            assert!(hits[0].path.ends_with("context.md"), "query={query}");
+        }
+    }
+
+    #[test]
+    fn backfills_related_trigram_index_from_workspace_fts() {
+        let (_keep, root) = temp_workspace();
+        let db = root.join("legacy-index.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                mtime INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                words INTEGER NOT NULL,
+                snippet TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE fts USING fts5(
+                path UNINDEXED, title, body,
+                tokenize = 'unicode61'
+            );
+            INSERT INTO fts VALUES
+                ('legacy.md', '旧文档', '上下文工程仍然值得检索');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open_index(&db).unwrap();
+        let hits = search_related(&conn, "上下文", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "legacy.md");
     }
 
     #[test]

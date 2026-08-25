@@ -505,6 +505,18 @@ async fn search_index(
     })
 }
 
+#[tauri::command]
+async fn search_related_index(
+    app: AppHandle,
+    query: String,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<indexer::SearchHit>, String> {
+    with_index(&app, &state, |conn, _| {
+        indexer::search_related(conn, &query, limit.unwrap_or(8))
+    })
+}
+
 /// 注册一个位于工作区之外的 Markdown 资料目录，并立即做一次增量索引。
 #[tauri::command]
 async fn add_library_source(
@@ -555,6 +567,20 @@ async fn search_library(
     })
     .await
     .map_err(|e| format!("资料搜索任务异常: {e}"))?
+}
+
+#[tauri::command]
+async fn search_related_library(
+    app: AppHandle,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<library::LibrarySearchHit>, String> {
+    let db_path = library::resolve_index_db(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        library::search_related_at(&db_path, &query, limit.unwrap_or(8))
+    })
+    .await
+    .map_err(|e| format!("关联资料搜索任务异常: {e}"))?
 }
 
 /// 只读打开已注册且已索引的 Library Markdown 文档。
@@ -774,9 +800,11 @@ pub fn run() {
             create_markdown,
             rebuild_index,
             search_index,
+            search_related_index,
             add_library_source,
             refresh_library,
             search_library,
+            search_related_library,
             read_library_document,
             list_agent_works,
             read_agent_work,

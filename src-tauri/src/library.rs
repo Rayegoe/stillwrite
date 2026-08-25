@@ -84,7 +84,7 @@ pub fn resolve_index_db(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 pub fn open_index(db_path: &Path) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(db_path)?;
+    let mut conn = Connection::open(db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.execute_batch(
@@ -111,8 +111,43 @@ pub fn open_index(db_path: &Path) -> rusqlite::Result<Connection> {
         CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(
             content_hash UNINDEXED, title, body,
             tokenize = 'unicode61'
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS library_related_fts USING fts5(
+            content_hash UNINDEXED, title, body,
+            tokenize = 'trigram'
+        );
+        CREATE TABLE IF NOT EXISTS library_related_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );",
     )?;
+
+    let related_ready: Option<String> = conn
+        .query_row(
+            "SELECT value FROM library_related_meta WHERE key = 'backfilled'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if related_ready.as_deref() != Some("1") {
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO library_related_fts (content_hash, title, body)
+             SELECT f.content_hash, f.title, f.body
+             FROM library_fts f
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM library_related_fts r
+                 WHERE r.content_hash = f.content_hash
+             )",
+            [],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO library_related_meta (key, value)
+             VALUES ('backfilled', '1')",
+            [],
+        )?;
+        tx.commit()?;
+    }
     Ok(conn)
 }
 
@@ -150,6 +185,15 @@ pub fn search_at(
 ) -> Result<Vec<LibrarySearchHit>, String> {
     let conn = open_index(db_path).map_err(|e| format!("打开资料库索引失败: {e}"))?;
     search(&conn, query, limit)
+}
+
+pub fn search_related_at(
+    db_path: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<LibrarySearchHit>, String> {
+    let conn = open_index(db_path).map_err(|e| format!("打开资料库索引失败: {e}"))?;
+    search_related(&conn, query, limit)
 }
 
 pub fn read_at(
@@ -337,6 +381,23 @@ fn refresh(conn: &mut Connection) -> Result<LibraryRefreshResult, String> {
                 )
                 .map_err(|e| format!("写入资料全文索引失败: {e}"))?;
             }
+            let related_fts_exists = tx
+                .query_row(
+                    "SELECT 1 FROM library_related_fts WHERE content_hash = ?1 LIMIT 1",
+                    params![content_hash],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|e| format!("读取关联资料索引失败: {e}"))?
+                .is_some();
+            if !related_fts_exists {
+                tx.execute(
+                    "INSERT INTO library_related_fts (content_hash, title, body)
+                     VALUES (?1, ?2, ?3)",
+                    params![content_hash, title, text],
+                )
+                .map_err(|e| format!("写入关联资料索引失败: {e}"))?;
+            }
 
             if previous.is_some() {
                 stats.updated += 1;
@@ -385,6 +446,11 @@ fn refresh(conn: &mut Connection) -> Result<LibraryRefreshResult, String> {
                 params![hash],
             )
             .map_err(|e| format!("清理资料全文索引失败: {e}"))?;
+            tx.execute(
+                "DELETE FROM library_related_fts WHERE content_hash = ?1",
+                params![hash],
+            )
+            .map_err(|e| format!("清理关联资料索引失败: {e}"))?;
         }
     }
     tx.commit()
@@ -452,6 +518,24 @@ fn search(
     query: &str,
     limit: usize,
 ) -> Result<Vec<LibrarySearchHit>, String> {
+    search_with_fts(conn, query, limit, "library_fts", false)
+}
+
+fn search_related(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<LibrarySearchHit>, String> {
+    search_with_fts(conn, query, limit, "library_related_fts", true)
+}
+
+fn search_with_fts(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    fts_table: &str,
+    related: bool,
+) -> Result<Vec<LibrarySearchHit>, String> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -462,10 +546,11 @@ fn search(
         .collect();
     let match_expr = tokens.join(" AND ");
     let mut corpus_hits = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT content_hash, snippet(library_fts, 2, '[[', ']]', '…', 14)
-         FROM library_fts WHERE library_fts MATCH ?1 ORDER BY rank LIMIT ?2",
-    ) {
+    let match_sql = format!(
+        "SELECT content_hash, snippet({fts_table}, 2, '[[', ']]', '…', 14)
+         FROM {fts_table} WHERE {fts_table} MATCH ?1 ORDER BY rank LIMIT ?2"
+    );
+    if let Ok(mut stmt) = conn.prepare(&match_sql) {
         if let Ok(rows) = stmt.query_map(params![match_expr, (limit * 3) as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         }) {
@@ -479,18 +564,38 @@ fn search(
 
     if corpus_hits.is_empty() {
         let like = format!("%{}%", query.trim());
-        let mut stmt = conn
-            .prepare(
-                "SELECT content_hash, snippet FROM library_documents
-                 WHERE title LIKE ?1 OR snippet LIKE ?1
-                 GROUP BY content_hash LIMIT ?2",
+        let fallback_sql = if related {
+            format!(
+                "SELECT f.content_hash, COALESCE(MIN(d.snippet), '')
+                 FROM {fts_table} f
+                 LEFT JOIN library_documents d ON d.content_hash = f.content_hash
+                 WHERE f.title LIKE ?1 OR f.body LIKE ?1
+                 GROUP BY f.content_hash LIMIT ?2"
             )
-            .map_err(|e| format!("资料搜索准备失败: {e}"))?;
+        } else {
+            "SELECT content_hash, snippet FROM library_documents
+             WHERE title LIKE ?1 OR snippet LIKE ?1
+             GROUP BY content_hash LIMIT ?2"
+                .to_string()
+        };
+        let mut stmt = conn.prepare(&fallback_sql).map_err(|e| {
+            if related {
+                format!("关联资料搜索准备失败: {e}")
+            } else {
+                format!("资料搜索准备失败: {e}")
+            }
+        })?;
         let rows = stmt
             .query_map(params![like, limit as i64], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|e| format!("资料搜索失败: {e}"))?;
+            .map_err(|e| {
+                if related {
+                    format!("关联资料搜索失败: {e}")
+                } else {
+                    format!("资料搜索失败: {e}")
+                }
+            })?;
         corpus_hits = rows.flatten().collect();
     }
 
@@ -686,6 +791,67 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert!(hits[0].relative_path.ends_with("002.md"));
         assert_eq!(hits[0].duplicate_count, 1);
+    }
+
+    #[test]
+    fn trigram_retrieves_chinese_substrings_and_two_character_terms() {
+        let keep = TempDir::new();
+        let source = keep.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("context.md"),
+            "# 上下文工程\n\n上下文工程正在成为 Agent Harness 的核心问题，模型能力也会因此重新分层。\n",
+        )
+        .unwrap();
+        let db = keep.path().join("library.db");
+        let source = canonical_source_root(&source).unwrap();
+        register_source_at(&db, &source).unwrap();
+
+        for query in ["上下文", "上下文工程", "模型", "Harness"] {
+            let hits = search_related_at(&db, query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "query={query}");
+            assert!(hits[0].relative_path.ends_with("context.md"), "query={query}");
+        }
+    }
+
+    #[test]
+    fn backfills_related_trigram_index_from_library_fts() {
+        let keep = TempDir::new();
+        let db = keep.path().join("legacy-library.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE library_sources (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                root TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE library_documents (
+                source_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                title TEXT NOT NULL,
+                mtime INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                content_hash TEXT NOT NULL,
+                words INTEGER NOT NULL,
+                snippet TEXT NOT NULL,
+                PRIMARY KEY (source_id, relative_path)
+            );
+            CREATE VIRTUAL TABLE library_fts USING fts5(
+                content_hash UNINDEXED, title, body,
+                tokenize = 'unicode61'
+            );
+            INSERT INTO library_sources VALUES ('s', '旧资料', '/legacy', 0);
+            INSERT INTO library_documents VALUES
+                ('s', 'legacy.md', '旧文档', 0, 10, 'hash', 4, '上下文工程仍然值得检索');
+            INSERT INTO library_fts VALUES ('hash', '旧文档', '上下文工程仍然值得检索');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let hits = search_related_at(&db, "上下文", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].relative_path, "legacy.md");
     }
 
     #[test]
