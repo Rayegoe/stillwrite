@@ -123,6 +123,9 @@ let relatedRequestToken = 0;
 let relatedSeedFingerprint = "";
 let relatedHasSearched = false;
 let relatedSupplementSeeds = [];
+const RELATED_PIN_STORAGE_KEY = "stillwrite.relatedPinned.v1";
+const RELATED_PIN_SCOPE_SEPARATOR = "\u001f";
+let relatedPinnedItems = loadRelatedPinnedItems();
 
 const DEFAULT_REMOTE = "user@example.invalid:~/stillwrite.git";
 let autoSync = false; // 首次手动同步成功后开启自动同步
@@ -241,6 +244,110 @@ function relatedPath(value) {
 		.replace(/\/+/g, "/")
 		.replace(/\/\.\//g, "/")
 		.replace(/\/$/, "");
+}
+
+function loadRelatedPinnedItems() {
+	try {
+		const parsed = JSON.parse(localStorage.getItem(RELATED_PIN_STORAGE_KEY) || "{}");
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+		return new Map(
+			Object.entries(parsed).filter(
+				([storageKey, item]) =>
+					Boolean(storageKey) &&
+					item &&
+					typeof item === "object" &&
+					typeof item.key === "string" &&
+					["annotation", "library", "workspace"].includes(item.kind),
+			),
+		);
+	} catch (error) {
+		console.warn("读取关联固定项失败", error);
+		return new Map();
+	}
+}
+
+function persistRelatedPinnedItems() {
+	try {
+		localStorage.setItem(
+			RELATED_PIN_STORAGE_KEY,
+			JSON.stringify(Object.fromEntries(relatedPinnedItems)),
+		);
+	} catch (error) {
+		console.warn("保存关联固定项失败", error);
+	}
+}
+
+function relatedPinScope() {
+	return relatedPath(rootPath) || "__no_workspace__";
+}
+
+function relatedPinStorageKey(item) {
+	return `${relatedPinScope()}${RELATED_PIN_SCOPE_SEPARATOR}${item.key}`;
+}
+
+function isRelatedPinned(item) {
+	return relatedPinnedItems.has(relatedPinStorageKey(item));
+}
+
+function serializableRelatedItem(item) {
+	return {
+		key: item.key,
+		kind: item.kind,
+		category: item.category,
+		title: item.title,
+		snippet: item.snippet,
+		source: item.source,
+		path: item.path || null,
+		raw: item.raw || {},
+	};
+}
+
+function restoreRelatedPinnedItem(item) {
+	if (!item || typeof item.key !== "string") return null;
+	return {
+		key: item.key,
+		kind: ["annotation", "library", "workspace"].includes(item.kind)
+			? item.kind
+			: "workspace",
+		category: item.category || "关联",
+		title: item.title || item.key,
+		snippet: item.snippet || "",
+		source: item.source || "",
+		path: item.path || null,
+		raw: item.raw && typeof item.raw === "object" ? item.raw : {},
+		pinned: true,
+		score: 0,
+		keywordKey: "",
+		matchedQueries: new Set(),
+		titleMatches: 0,
+		phraseMatches: 0,
+		order: 0,
+	};
+}
+
+function currentPinnedRelatedItems() {
+	const prefix = `${relatedPinScope()}${RELATED_PIN_SCOPE_SEPARATOR}`;
+	return [...relatedPinnedItems.entries()]
+		.filter(([storageKey]) => storageKey.startsWith(prefix))
+		.map(([, item]) => restoreRelatedPinnedItem(item))
+		.filter(Boolean);
+}
+
+function toggleRelatedPinned(item) {
+	const storageKey = relatedPinStorageKey(item);
+	const pinned = !relatedPinnedItems.has(storageKey);
+	if (pinned) relatedPinnedItems.set(storageKey, serializableRelatedItem(item));
+	else relatedPinnedItems.delete(storageKey);
+	persistRelatedPinnedItems();
+	item.pinned = pinned;
+	relatedItems = [...relatedItems].sort(
+		(a, b) => Number(b.pinned) - Number(a.pinned),
+	);
+	renderRelatedPanel();
+	if (!pinned) {
+		relatedSeedFingerprint = "";
+		scheduleRelatedRefresh(0);
+	}
 }
 
 function stripRelatedMarkdown(value) {
@@ -565,7 +672,7 @@ function renderRelatedPanel() {
 	const fragment = document.createDocumentFragment();
 	for (const item of relatedItems) {
 		const card = document.createElement("article");
-		card.className = "related-card";
+		card.className = `related-card${item.pinned ? " pinned" : ""}`;
 		const open = document.createElement("button");
 		open.type = "button";
 		open.className = "related-card-open";
@@ -585,6 +692,8 @@ function renderRelatedPanel() {
 		open.addEventListener("click", () => void openRelatedItem(item));
 		card.appendChild(open);
 
+		const actions = document.createElement("div");
+		actions.className = "related-card-actions";
 		if (item.kind === "library") {
 			const citation = document.createElement("label");
 			citation.className = "related-card-citation";
@@ -598,8 +707,21 @@ function renderRelatedPanel() {
 				renderCitationSummary();
 			});
 			citation.append(checkbox, document.createTextNode("引用"));
-			card.appendChild(citation);
+			actions.appendChild(citation);
 		}
+
+		const pin = document.createElement("button");
+		pin.type = "button";
+		pin.className = "related-card-pin";
+		pin.setAttribute("aria-pressed", String(Boolean(item.pinned)));
+		pin.title = item.pinned ? "取消固定这条关联" : "固定这条关联，不受检索刷新影响";
+		pin.textContent = item.pinned ? "★ 已固定" : "☆ 固定";
+		pin.addEventListener("click", (event) => {
+			event.stopPropagation();
+			toggleRelatedPinned(item);
+		});
+		actions.appendChild(pin);
+		card.appendChild(actions);
 		fragment.appendChild(card);
 	}
 	relatedStream.appendChild(fragment);
@@ -753,6 +875,7 @@ function mergeRelatedHits(batches) {
 				? normalizeRelatedWorkspaceHit(hit, batch.candidate, rank)
 				: normalizeRelatedLibraryHit(hit, batch.candidate, rank);
 			if (!item) return;
+			item.pinned = isRelatedPinned(item);
 			const existing = merged.get(item.key);
 			if (existing) {
 				if (!existing.matchedQueries.has(item.keywordKey)) {
@@ -768,10 +891,21 @@ function mergeRelatedHits(batches) {
 			}
 		});
 	}
+	for (const pinned of currentPinnedRelatedItems()) {
+		const existing = merged.get(pinned.key);
+		if (existing) {
+			existing.pinned = true;
+			continue;
+		}
+		pinned.order = order;
+		order += 1;
+		merged.set(pinned.key, pinned);
+	}
 
 	const categoryOrder = { annotation: 0, workspace: 1, library: 2 };
-	return [...merged.values()]
+	const sorted = [...merged.values()]
 		.sort((a, b) =>
+			Number(b.pinned) - Number(a.pinned) ||
 			b.score - a.score ||
 			b.matchedQueries.size - a.matchedQueries.size ||
 			b.phraseMatches - a.phraseMatches ||
@@ -780,8 +914,10 @@ function mergeRelatedHits(batches) {
 			a.title.localeCompare(b.title, "zh-CN") ||
 			a.source.localeCompare(b.source, "zh-CN") ||
 			a.order - b.order,
-		)
-		.slice(0, 5);
+		);
+	const pinned = sorted.filter((item) => item.pinned);
+	const unpinned = sorted.filter((item) => !item.pinned).slice(0, 5);
+	return [...pinned, ...unpinned];
 }
 
 async function refreshRelated() {
@@ -792,7 +928,7 @@ async function refreshRelated() {
 	if (fingerprint === relatedSeedFingerprint) return;
 	relatedSeedFingerprint = fingerprint;
 	if (!candidates.length) {
-		relatedItems = [];
+		relatedItems = mergeRelatedHits([]);
 		relatedHasSearched = false;
 		renderRelatedToolbar();
 		renderRelatedPanel();
