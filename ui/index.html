@@ -124,10 +124,10 @@
           </div>
           <div class="library-meta" id="libraryMeta" hidden>
             <div id="libraryStats">尚未添加资料源</div>
-            <div class="workset-bar" id="worksetBar" hidden>
-              <span id="worksetCount">当前 Workset · 0 篇</span>
-              <button class="text-btn" id="clearWorkset" type="button">清空</button>
-            </div>
+          </div>
+          <div class="workset-bar" id="worksetBar" hidden>
+            <span id="worksetCount">当前引用 · 0 篇</span>
+            <button class="text-btn" id="clearWorkset" type="button">清空</button>
           </div>
           <div class="agent-meta" id="agentMeta" hidden>
             <div id="agentStats">还没有 Agent 工作</div>
@@ -260,6 +260,10 @@
         <div class="agent-ask-context" id="agentAskContext" hidden>
           <div class="agent-ask-context-label">当前选区</div>
           <blockquote id="agentAskQuote"></blockquote>
+        </div>
+        <div class="agent-ask-refs" id="agentAskRefs" hidden>
+          <div class="agent-ask-context-label">当前引用</div>
+          <ul id="agentAskRefList"></ul>
         </div>
         <textarea
           id="agentAskPrompt"

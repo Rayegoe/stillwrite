@@ -67,6 +67,8 @@ const agentAskForm = document.querySelector("#agentAskForm");
 const agentAskTitle = document.querySelector("#agentAskTitle");
 const agentAskContext = document.querySelector("#agentAskContext");
 const agentAskQuote = document.querySelector("#agentAskQuote");
+const agentAskRefs = document.querySelector("#agentAskRefs");
+const agentAskRefList = document.querySelector("#agentAskRefList");
 const agentAskPrompt = document.querySelector("#agentAskPrompt");
 const agentAskCancel = document.querySelector("#agentAskCancel");
 const agentAskSend = document.querySelector("#agentAskSend");
@@ -79,7 +81,7 @@ let libraryMode = false;
 let agentMode = false;
 let librarySources = [];
 let libraryStatsData = { total_documents: 0, unique_documents: 0 };
-const libraryWorkset = new Map();
+const citationBasket = new Map();
 let agentWorkItems = [];
 let pendingAgentRequest = null;
 let localAgentRuns = [];
@@ -200,17 +202,17 @@ function libraryRefFor(hit, document = hit) {
 	};
 }
 
-function renderWorksetSummary() {
-	const count = libraryWorkset.size;
-	worksetCount.textContent = `当前 Workset · ${count} 篇`;
-	worksetBar.hidden = !libraryMode || count === 0;
+function renderCitationSummary() {
+	const count = citationBasket.size;
+	worksetCount.textContent = `当前引用 · ${count} 篇`;
+	worksetBar.hidden = count === 0;
 }
 
-async function loadWorksetContext() {
-	if (!libraryWorkset.size) return "";
+async function loadCitationContext() {
+	if (!citationBasket.size) return "";
 	const sections = [];
 	let remaining = 60000;
-	for (const hit of libraryWorkset.values()) {
+	for (const hit of citationBasket.values()) {
 		if (remaining <= 0) break;
 		try {
 			const document = await invoke("read_library_document", {
@@ -219,32 +221,17 @@ async function loadWorksetContext() {
 			});
 			const content = document.content.slice(0, Math.min(12000, remaining));
 			remaining -= content.length;
-			let annotationContext = "";
-			try {
-				const annotation = await invoke("read_annotation", {
-					target: libraryRefFor(hit, document),
-				});
-				const items = AnnotationCodec.parse(
-					annotation.body || "",
-					annotation.updated_at || "",
-				);
-				annotationContext = items
-					.map((item) => `批注：${item.quote}\n笔记：${item.note}`)
-					.join("\n\n");
-			} catch (error) {
-				console.warn("读取资料批注失败", error);
-			}
 			sections.push(
-				`### ${document.title}\n来源：${document.source_name} · ${document.relative_path}\n引用：${document.uri}\n\n${content}${annotationContext ? `\n\n批注：\n${annotationContext}` : ""}`,
+				`### ${document.title}\n来源：${document.source_name} · ${document.relative_path}\n引用：${document.uri}\n\n${content}`,
 			);
 		} catch (error) {
 			sections.push(`### ${hit.title}\n引用：${hit.uri}\n（读取失败：${String(error)}）`);
 		}
 	}
 	return [
-		"以下是 StillWrite 当前 Workset 的只读资料。它们来自 Library，不属于 Workspace；回答涉及事实时请优先引用这些资料。",
+		"以下是 StillWrite 当前引用的只读资料。它们来自 Library，不属于 Workspace；回答涉及事实时请优先引用这些资料。",
 		sections.join("\n\n---\n\n"),
-		"以上是 Workset。",
+		"以上是当前引用。",
 	].join("\n\n");
 }
 
@@ -300,13 +287,13 @@ function allAgentWorkItems() {
 	);
 }
 
-function buildAgentPrompt(request, prompt, worksetContext) {
+function buildAgentPrompt(request, prompt, citationContext) {
 	const context = [];
 	if (request?.originUri) context.push(`当前来源：${request.originUri}`);
 	if (request?.originQuote) {
 		context.push(`当前选区：\n> ${request.originQuote.replaceAll("\n", "\n> ")}`);
 	}
-	if (worksetContext) context.push(worksetContext);
+	if (citationContext) context.push(citationContext);
 	context.push(`用户请求：\n${prompt}`);
 	return context.join("\n\n");
 }
@@ -628,7 +615,7 @@ function updateLibrarySummary(result) {
 		: "尚未添加资料源";
 	if (result.warnings?.length) libraryStats.title = result.warnings.join("\n");
 	else libraryStats.removeAttribute("title");
-	renderWorksetSummary();
+	renderCitationSummary();
 }
 
 function renderLibraryHome() {
@@ -694,12 +681,12 @@ function renderLibrarySearchResults(hits) {
 		actions.className = "library-hit-actions";
 		const checkbox = document.createElement("input");
 		checkbox.type = "checkbox";
-		checkbox.checked = libraryWorkset.has(hit.uri);
-		checkbox.title = "加入当前 Workset";
+		checkbox.checked = citationBasket.has(hit.uri);
+		checkbox.title = "加入当前引用";
 		checkbox.addEventListener("change", () => {
-			if (checkbox.checked) libraryWorkset.set(hit.uri, hit);
-			else libraryWorkset.delete(hit.uri);
-			renderWorksetSummary();
+			if (checkbox.checked) citationBasket.set(hit.uri, hit);
+			else citationBasket.delete(hit.uri);
+			renderCitationSummary();
 		});
 		actions.append(checkbox, document.createTextNode("引用"));
 		row.append(open, actions);
@@ -764,7 +751,7 @@ async function setSidebarMode(mode) {
 			: "搜索全文（FTS）…";
 	searchInput.value = "";
 	clearTimeout(searchTimer);
-	renderWorksetSummary();
+	renderCitationSummary();
 	if (libraryMode) {
 		if (!librarySources.length) await refreshLibrary();
 		else renderLibraryHome();
@@ -779,6 +766,11 @@ async function setSidebarMode(mode) {
 
 async function useWorkspace(data) {
 	if (!data) return;
+	const workspaceChanged = !rootPath || !samePath(rootPath, data.root);
+	if (workspaceChanged) {
+		citationBasket.clear();
+		renderCitationSummary();
+	}
 	editor.readOnly = false;
 	editor.classList.remove("readonly");
 	editorPaneLabel.textContent = "WRITE";
@@ -1350,6 +1342,17 @@ function captureEditorAnnotation() {
 	return range.quote.trim() ? range : null;
 }
 
+function renderAgentAskRefs() {
+	const hits = [...citationBasket.values()];
+	agentAskRefList.replaceChildren();
+	for (const hit of hits) {
+		const item = document.createElement("li");
+		item.textContent = hit.title || hit.relative_path || hit.uri;
+		agentAskRefList.appendChild(item);
+	}
+	agentAskRefs.hidden = hits.length === 0;
+}
+
 async function beginAgentQuestion(range = null, { allowEmpty = false } = {}) {
 	const target = currentDocumentRef();
 	if (!target && !allowEmpty) {
@@ -1371,6 +1374,7 @@ async function beginAgentQuestion(range = null, { allowEmpty = false } = {}) {
 		: "新 Agent 工作";
 	agentAskContext.hidden = !pendingAgentRequest.originQuote;
 	agentAskQuote.textContent = pendingAgentRequest.originQuote || "";
+	renderAgentAskRefs();
 	agentAskPrompt.value = "";
 	agentAskSend.disabled = false;
 	agentAskDialog.showModal();
@@ -1418,10 +1422,10 @@ async function submitAgentQuestion(event) {
 	saveStateEl.classList.remove("error");
 	try {
 		await probeAgent();
-		const worksetContext = await loadWorksetContext();
+		const citationContext = await loadCitationContext();
 		const response = await invoke("agent_turn", {
 			input: {
-				prompt: buildAgentPrompt(request, prompt, worksetContext),
+				prompt: buildAgentPrompt(request, prompt, citationContext),
 				sessionId: agentSessionId,
 				messageId: globalThis.crypto?.randomUUID?.() || `msg-${Date.now()}`,
 			},
@@ -2046,8 +2050,8 @@ agentTab.addEventListener("click", () => void setSidebarMode("agent"));
 addLibrarySourceButton.addEventListener("click", addLibrarySource);
 newAgentWorkButton.addEventListener("click", () => void beginAgentQuestion(null, { allowEmpty: true }));
 clearWorksetButton.addEventListener("click", () => {
-	libraryWorkset.clear();
-	renderWorksetSummary();
+	citationBasket.clear();
+	renderCitationSummary();
 	if (libraryMode && searchInput.value.trim()) void runSearch();
 });
 document.querySelector("#refreshMenu").addEventListener("click", refreshTree);

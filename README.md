@@ -83,12 +83,12 @@ Library 是 Workspace 之外的只读资料层，不是 RSS 阅读器，也不�
 - 侧栏切换到 `资料`，点击 `＋` 注册一个外部 Markdown 目录（资料源不能与当前工作区重叠）。
 - StillWrite 只扫描已注册目录，按 `mtime + size` 增量更新独立的 `library/index.db`；正文继续留在原始 `.md` 文件。
 - Library 使用 SHA-256 对规范化后的 Markdown 内容去重；重复文件仍保留在原目录，但搜索结果只显示一个 corpus item。
-- 搜索结果勾选“引用”即可加入当前 Workset。打开资料时正文仍只读，但可以使用与 Workspace 完全相同的选取、批注、高亮和批注面板。
+- 搜索结果勾选“引用”即可加入当前引用篮。打开资料时正文仍只读，但可以使用与 Workspace 完全相同的选取、批注、高亮和批注面板。
 - Library 批注使用同一套 Markdown 批注格式，写入 StillWrite 应用数据目录，不修改外部资料，也不进入 Workspace 文件树、git 同步或 Workspace 汇总。
-- 发送 Agent 请求时，StillWrite 才读取 Workset 资料及其批注，并把它们作为有边界的只读引用传入。
+- 发送 Agent 请求时，StillWrite 才读取当前引用篮中的资料正文，并把它们作为有边界的只读引用传入；勾选原文不会自动携带批注。
 - 刷新会清理已删除文件的索引；SQLite 可直接删除，下一次刷新会从资料源重建。
 
-Library 的目标边界是：`Library ≠ Workspace`、`Workset ≠ Library`、`Index ≠ Content`。当前版本暂不包含 RSS 网络抓取、Embedding、标签、自动分类和摘要。
+Library 的目标边界是：`Library ≠ Workspace`、`Index ≠ Content`。引用篮是当前会话内的临时选择，不是持久化对象；发送时读取当前资料正文。当前版本暂不包含 RSS 网络抓取、Embedding、标签、自动分类和摘要。
 
 ## v0.5 原型：Agent Work / Agent 工作
 
@@ -207,7 +207,7 @@ stillwrite/
 │   ├── annotations.test.js # 批注格式与锚点单元测试
 │   ├── document-links.js # URL 与项目内 Markdown 名称/路径识别和跳转
 │   ├── document-links.test.js # 内外链接识别与相对路径解析测试
-│   ├── app.js          # 文件树、Library、搜索、Workset、同步、预览、布局、批注
+│   ├── app.js          # 文件树、Library、搜索、引用篮、同步、预览、布局、批注
 │   └── style.css       # 沉浸式双栏视觉 + 批注栏 + 资料库
 └── src-tauri/
     ├── src/lib.rs      # 文件夹/文档选择 + 工作区边界 + 文件读写 + Tauri command 注册
