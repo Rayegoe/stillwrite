@@ -65,11 +65,11 @@
           <span class="sync-state" id="syncState" hidden></span>
           <span class="save-state" id="saveState">就绪</span>
           <button
-            class="text-btn agent-btn"
-            id="agentButton"
-            title="打开 Agent 工作台"
+            class="text-btn ask-agent-btn"
+            id="askAgentButton"
+            title="围绕当前文档或选区询问 Agent"
           >
-            Agent
+            问 Agent
           </button>
           <button
             class="text-btn annotate-btn"
@@ -91,10 +91,28 @@
       <main class="workspace">
         <aside class="sidebar" id="sidebar">
           <div class="sidebar-head">
-            <span>文件</span>
-            <button class="icon-btn subtle" id="refreshTree" title="刷新目录">
-              ↻
-            </button>
+            <div class="sidebar-tabs" role="tablist" aria-label="内容平面">
+              <button class="sidebar-tab active" id="workspaceTab" role="tab" aria-selected="true">
+                文件
+              </button>
+              <button class="sidebar-tab" id="libraryTab" role="tab" aria-selected="false">
+                资料
+              </button>
+              <button class="sidebar-tab" id="agentTab" role="tab" aria-selected="false">
+                Agent
+              </button>
+            </div>
+            <div class="sidebar-head-actions">
+              <button class="icon-btn subtle" id="addLibrarySource" title="添加资料源" hidden>
+                ＋
+              </button>
+              <button class="icon-btn subtle" id="newAgentWorkButton" title="新建 Agent 工作" hidden>
+                ＋
+              </button>
+              <button class="icon-btn subtle" id="refreshTree" title="刷新目录">
+                ↻
+              </button>
+            </div>
           </div>
           <div class="search-box">
             <input
@@ -103,6 +121,16 @@
               placeholder="搜索全文（FTS）…"
               autocomplete="off"
             />
+          </div>
+          <div class="library-meta" id="libraryMeta" hidden>
+            <div id="libraryStats">尚未添加资料源</div>
+            <div class="workset-bar" id="worksetBar" hidden>
+              <span id="worksetCount">当前 Workset · 0 篇</span>
+              <button class="text-btn" id="clearWorkset" type="button">清空</button>
+            </div>
+          </div>
+          <div class="agent-meta" id="agentMeta" hidden>
+            <div id="agentStats">还没有 Agent 工作</div>
           </div>
           <div class="tree" id="tree">
             <div class="empty-tip">从“文件”菜单打开文件夹或 Markdown 文档</div>
@@ -116,7 +144,7 @@
 
         <section class="panes" id="panes">
           <section class="pane editor-pane" id="editorPane">
-            <div class="pane-label">WRITE</div>
+            <div class="pane-label" id="editorPaneLabel">WRITE</div>
             <textarea
               id="editor"
               spellcheck="true"
@@ -209,33 +237,6 @@
           </div>
         </section>
       </main>
-
-      <section class="agent-probe" id="agentPanel" hidden aria-label="Agent 工作台">
-        <div class="agent-probe-head">
-          <div>
-            <strong>Agent 工作台</strong>
-            <span id="agentState">尚未连接</span>
-          </div>
-          <button class="icon-btn subtle" id="closeAgent" title="关闭 Agent 工作台">×</button>
-        </div>
-        <div class="agent-transcript" id="agentTranscript" aria-live="polite">
-          <p class="agent-empty">输入自然语言指令，结果经本地 Gateway 与 Runtime 返回。</p>
-        </div>
-        <div class="agent-evidence" id="agentEvidence" hidden></div>
-        <div class="agent-composer">
-          <textarea
-            id="agentPrompt"
-            rows="3"
-            placeholder="给 Agent 一条自然语言指令…"
-            aria-label="Agent 指令"
-          ></textarea>
-          <div class="agent-actions">
-            <span>Ctrl+Enter 发送</span>
-            <button class="text-btn" id="agentCancel" disabled>停止等待</button>
-            <button class="primary-btn" id="agentSend">发送</button>
-          </div>
-        </div>
-      </section>
     </div>
 
     <dialog id="newFileDialog" class="modal">
@@ -253,9 +254,36 @@
       </form>
     </dialog>
 
-    <button class="selection-annotate" id="selectionAnnotate" type="button" hidden>
-      ＋ 批注
-    </button>
+    <dialog id="agentAskDialog" class="modal agent-ask-dialog">
+      <form method="dialog" id="agentAskForm">
+        <h3 id="agentAskTitle">问 Agent</h3>
+        <div class="agent-ask-context" id="agentAskContext" hidden>
+          <div class="agent-ask-context-label">当前选区</div>
+          <blockquote id="agentAskQuote"></blockquote>
+        </div>
+        <textarea
+          id="agentAskPrompt"
+          rows="5"
+          spellcheck="true"
+          autocomplete="off"
+          placeholder="例如：查证这个判断，并找两个反例…"
+          aria-label="Agent 请求"
+        ></textarea>
+        <div class="modal-actions">
+          <button type="button" class="text-btn" id="agentAskCancel">取消</button>
+          <button type="submit" class="primary-btn" id="agentAskSend">发送</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="selection-actions" id="selectionActions" hidden>
+      <button class="selection-annotate" id="selectionAnnotate" type="button">
+        ＋ 批注
+      </button>
+      <button class="selection-agent" id="selectionAgent" type="button">
+        问 Agent
+      </button>
+    </div>
 
     <script src="./annotations.js"></script>
     <script src="./document-links.js"></script>

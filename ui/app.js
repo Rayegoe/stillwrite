@@ -8,6 +8,7 @@ const panes = document.querySelector("#panes");
 const editorPane = document.querySelector("#editorPane");
 const readerPane = document.querySelector("#readerPane");
 const editor = document.querySelector("#editor");
+const editorPaneLabel = document.querySelector("#editorPaneLabel");
 const treeEl = document.querySelector("#tree");
 const previewEl = document.querySelector("#preview");
 const saveStateEl = document.querySelector("#saveState");
@@ -19,6 +20,18 @@ const newFileForm = document.querySelector("#newFileForm");
 const syncButton = document.querySelector("#syncButton");
 const syncStateEl = document.querySelector("#syncState");
 const searchInput = document.querySelector("#searchInput");
+const workspaceTab = document.querySelector("#workspaceTab");
+const libraryTab = document.querySelector("#libraryTab");
+const agentTab = document.querySelector("#agentTab");
+const addLibrarySourceButton = document.querySelector("#addLibrarySource");
+const newAgentWorkButton = document.querySelector("#newAgentWorkButton");
+const libraryMeta = document.querySelector("#libraryMeta");
+const libraryStats = document.querySelector("#libraryStats");
+const agentMeta = document.querySelector("#agentMeta");
+const agentStats = document.querySelector("#agentStats");
+const worksetBar = document.querySelector("#worksetBar");
+const worksetCount = document.querySelector("#worksetCount");
+const clearWorksetButton = document.querySelector("#clearWorkset");
 const fileMenuRoot = document.querySelector("#fileMenuRoot");
 const fileMenuButton = document.querySelector("#fileMenuButton");
 const fileMenu = document.querySelector("#fileMenu");
@@ -41,23 +54,35 @@ const annotationDraft = document.querySelector("#annotationDraft");
 const newAnnotationButton = document.querySelector("#newAnnotation");
 const addAnnotationButton = document.querySelector("#addAnnotation");
 const cancelAnnotationButton = document.querySelector("#cancelAnnotation");
+const selectionActions = document.querySelector("#selectionActions");
 const selectionAnnotateButton = document.querySelector("#selectionAnnotate");
+const selectionAgentButton = document.querySelector("#selectionAgent");
 const annotateSaveState = document.querySelector("#annotateSaveState");
 const annotateFoot = document.querySelector("#annotateFoot");
 const AnnotationCodec = window.StillwriteAnnotations;
 const DocumentLinks = window.StillwriteDocumentLinks;
-const agentButton = document.querySelector("#agentButton");
-const agentPanel = document.querySelector("#agentPanel");
-const closeAgent = document.querySelector("#closeAgent");
-const agentState = document.querySelector("#agentState");
-const agentTranscript = document.querySelector("#agentTranscript");
-const agentEvidence = document.querySelector("#agentEvidence");
-const agentPrompt = document.querySelector("#agentPrompt");
-const agentSend = document.querySelector("#agentSend");
-const agentCancel = document.querySelector("#agentCancel");
+const askAgentButton = document.querySelector("#askAgentButton");
+const agentAskDialog = document.querySelector("#agentAskDialog");
+const agentAskForm = document.querySelector("#agentAskForm");
+const agentAskTitle = document.querySelector("#agentAskTitle");
+const agentAskContext = document.querySelector("#agentAskContext");
+const agentAskQuote = document.querySelector("#agentAskQuote");
+const agentAskPrompt = document.querySelector("#agentAskPrompt");
+const agentAskCancel = document.querySelector("#agentAskCancel");
+const agentAskSend = document.querySelector("#agentAskSend");
 
 let rootPath = localStorage.getItem("stillwrite.rootPath");
 let currentFile = null;
+let currentLibraryDocument = null;
+let currentAgentDocument = null;
+let libraryMode = false;
+let agentMode = false;
+let librarySources = [];
+let libraryStatsData = { total_documents: 0, unique_documents: 0 };
+const libraryWorkset = new Map();
+let agentWorkItems = [];
+let pendingAgentRequest = null;
+let localAgentRuns = [];
 let saveTimer = null;
 let sidebarWidth = Number(
 	localStorage.getItem("stillwrite.sidebarWidth") || 248,
@@ -74,7 +99,8 @@ let annotateWidth = Number(
 	localStorage.getItem("stillwrite.annotateWidth") || 360,
 );
 let annotationItems = []; // 当前文档的结构化批注
-let annotateLoadedDoc = null; // 当前加载了批注的文档路径
+let annotateLoadedDoc = null; // 当前加载了批注的 DocumentRef key
+let annotationLoadToken = 0; // 丢弃切换文档时迟到的批注读取结果
 let annotateDirty = false;
 let annotateTimer = null;
 let activeAnnotationId = null;
@@ -94,6 +120,7 @@ const agentSessionId =
 let agentBusy = false;
 let agentProbed = false;
 let agentCancelRequested = false;
+let activeAgentRunId = null;
 
 const ALLOWED_PREVIEW_TAGS = new Set([
 	"P",
@@ -128,116 +155,174 @@ function escapeHtml(value) {
 		.replaceAll("'", "&#039;");
 }
 
-function setAgentState(text, kind = "") {
-	agentState.textContent = text;
-	agentState.classList.remove("ok", "busy", "error");
-	if (kind) agentState.classList.add(kind);
+function markReadonly() {
+	saveStateEl.textContent = "只读资料";
+	saveStateEl.classList.remove("dirty", "error");
 }
 
-function appendAgentMessage(role, text) {
-	agentTranscript.querySelector(".agent-empty")?.remove();
-	const item = document.createElement("article");
-	item.className = `agent-message ${role}`;
-	const label = document.createElement("div");
-	label.className = "agent-message-role";
-	label.textContent = role === "user" ? "YOU" : role === "agent" ? "AGENT" : "SYSTEM";
-	const body = document.createElement("div");
-	body.className = "agent-message-body";
-	body.textContent = text;
-	item.append(label, body);
-	agentTranscript.append(item);
-	agentTranscript.scrollTop = agentTranscript.scrollHeight;
+function currentDocumentRef() {
+	if (currentFile) return { kind: "workspace", path: currentFile };
+	if (currentLibraryDocument) {
+		return {
+			kind: "library",
+			sourceId: currentLibraryDocument.source_id,
+			relativePath: currentLibraryDocument.relative_path,
+			contentHash: currentLibraryDocument.content_hash,
+		};
+	}
+	if (currentAgentDocument) return { kind: "agent", id: currentAgentDocument.id };
+	return null;
 }
 
-function showAgentEvidence(response) {
-	agentEvidence.hidden = false;
-	agentEvidence.replaceChildren();
-	const session = document.createElement("code");
-	session.textContent = `conversation ${response.conversationId}`;
-	const run = document.createElement("code");
-	run.textContent = `run ${response.runId || "—"}`;
-	const receipt = document.createElement("code");
-	receipt.textContent = `receipt ${response.receiptRef || "—"}`;
-	agentEvidence.append(session, run, receipt);
+function documentRefKey(ref = currentDocumentRef()) {
+	if (!ref) return null;
+	if (ref.kind === "workspace") return `workspace:${ref.path}`;
+	if (ref.kind === "library")
+		return `library:${ref.sourceId}:${ref.relativePath}:${ref.contentHash}`;
+	return `agent:${ref.id}`;
+}
+
+function currentDocumentUri() {
+	const ref = currentDocumentRef();
+	if (!ref) return null;
+	if (ref.kind === "workspace")
+		return `workspace://${relativeDocumentPath(ref.path).replaceAll("\\", "/")}`;
+	if (ref.kind === "library") return currentLibraryDocument?.uri || null;
+	return currentAgentDocument?.uri || `agent://${ref.id}`;
+}
+
+function libraryRefFor(hit, document = hit) {
+	return {
+		kind: "library",
+		sourceId: document.source_id,
+		relativePath: document.relative_path,
+		contentHash: document.content_hash,
+	};
+}
+
+function renderWorksetSummary() {
+	const count = libraryWorkset.size;
+	worksetCount.textContent = `当前 Workset · ${count} 篇`;
+	worksetBar.hidden = !libraryMode || count === 0;
+}
+
+async function loadWorksetContext() {
+	if (!libraryWorkset.size) return "";
+	const sections = [];
+	let remaining = 60000;
+	for (const hit of libraryWorkset.values()) {
+		if (remaining <= 0) break;
+		try {
+			const document = await invoke("read_library_document", {
+				sourceId: hit.source_id,
+				relativePath: hit.relative_path,
+			});
+			const content = document.content.slice(0, Math.min(12000, remaining));
+			remaining -= content.length;
+			let annotationContext = "";
+			try {
+				const annotation = await invoke("read_annotation", {
+					target: libraryRefFor(hit, document),
+				});
+				const items = AnnotationCodec.parse(
+					annotation.body || "",
+					annotation.updated_at || "",
+				);
+				annotationContext = items
+					.map((item) => `批注：${item.quote}\n笔记：${item.note}`)
+					.join("\n\n");
+			} catch (error) {
+				console.warn("读取资料批注失败", error);
+			}
+			sections.push(
+				`### ${document.title}\n来源：${document.source_name} · ${document.relative_path}\n引用：${document.uri}\n\n${content}${annotationContext ? `\n\n批注：\n${annotationContext}` : ""}`,
+			);
+		} catch (error) {
+			sections.push(`### ${hit.title}\n引用：${hit.uri}\n（读取失败：${String(error)}）`);
+		}
+	}
+	return [
+		"以下是 StillWrite 当前 Workset 的只读资料。它们来自 Library，不属于 Workspace；回答涉及事实时请优先引用这些资料。",
+		sections.join("\n\n---\n\n"),
+		"以上是 Workset。",
+	].join("\n\n");
 }
 
 async function probeAgent() {
 	if (agentProbed) return;
-	setAgentState("正在探测…", "busy");
-	try {
-		const result = await invoke("agent_probe");
-		agentProbed = true;
-		setAgentState(`${result.profile} 已连接`, "ok");
-		agentState.title = result.launcher;
-	} catch (error) {
-		setAgentState("不可用", "error");
-		agentState.title = String(error);
-	}
+	await invoke("agent_probe");
+	agentProbed = true;
 }
 
-async function setAgentPanelVisible(visible) {
-	agentPanel.hidden = !visible;
-	agentButton.classList.toggle("active", visible);
-	if (visible) {
-		await probeAgent();
-		agentPrompt.focus();
-	}
+function formatAgentTime(value) {
+	if (!value) return "刚刚";
+	const millis = value < 100000000000 ? value * 1000 : value;
+	return new Date(millis).toLocaleString("zh-CN", {
+		month: "numeric",
+		day: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+	});
 }
 
-async function sendAgentTurn() {
-	if (agentBusy) return;
-	if (!rootPath) {
-		await chooseWorkspace();
-		if (!rootPath) return;
+function agentWorkTitle(prompt) {
+	const firstLine = prompt
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.find(Boolean) || "Agent 工作";
+	const clean = firstLine.replace(/^#+\s*/, "").replace(/[。！？.!?]+$/, "");
+	return clean.length > 56 ? `${clean.slice(0, 56)}…` : clean;
+}
+
+function agentDocumentContent(text, title) {
+	const body = String(text || "").trim();
+	if (!body) return `# ${title}\n\nAgent 没有返回正文。\n`;
+	return /^#\s+/.test(body) ? `${body}\n` : `# ${title}\n\n${body}\n`;
+}
+
+function makeLocalAgentRun(request, prompt) {
+	const id = `local-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+	return {
+		id,
+		title: agentWorkTitle(prompt),
+		prompt,
+		originUri: request?.originUri || null,
+		originQuote: request?.originQuote || null,
+		updatedAt: Math.floor(Date.now() / 1000),
+		status: "running",
+		local: true,
+	};
+}
+
+function allAgentWorkItems() {
+	return [...localAgentRuns, ...agentWorkItems].sort(
+		(a, b) => (b.updatedAt || 0) - (a.updatedAt || 0),
+	);
+}
+
+function buildAgentPrompt(request, prompt, worksetContext) {
+	const context = [];
+	if (request?.originUri) context.push(`当前来源：${request.originUri}`);
+	if (request?.originQuote) {
+		context.push(`当前选区：\n> ${request.originQuote.replaceAll("\n", "\n> ")}`);
 	}
-	const prompt = agentPrompt.value.trim();
-	if (!prompt) return;
-	agentBusy = true;
-	agentCancelRequested = false;
-	agentSend.disabled = true;
-	agentCancel.disabled = false;
-	setAgentState("Runtime 运行中…", "busy");
-	appendAgentMessage("user", prompt);
-	try {
-		const response = await invoke("agent_turn", {
-			input: {
-				prompt,
-				sessionId: agentSessionId,
-				messageId: globalThis.crypto?.randomUUID?.() || `msg-${Date.now()}`,
-			},
-		});
-		appendAgentMessage(response.status === "error" ? "system" : "agent", response.text);
-		showAgentEvidence(response);
-		agentPrompt.value = "";
-		setAgentState(
-			response.status === "paused" ? "运行已暂停" : `已返回 · ${response.status}`,
-			response.status === "error" ? "error" : "ok",
-		);
-	} catch (error) {
-		if (agentCancelRequested) {
-			setAgentState("已停止等待此本地进程");
-			appendAgentMessage("system", "已停止等待此本地进程；这不表示外部任务或效果已撤销。");
-		} else {
-			setAgentState("调用失败", "error");
-			appendAgentMessage("system", String(error));
-		}
-	} finally {
-		agentBusy = false;
-		agentSend.disabled = false;
-		agentCancel.disabled = true;
-		agentCancelRequested = false;
-		agentPrompt.focus();
-	}
+	if (worksetContext) context.push(worksetContext);
+	context.push(`用户请求：\n${prompt}`);
+	return context.join("\n\n");
 }
 
 async function cancelAgentTurn() {
 	if (!agentBusy) return;
 	try {
 		agentCancelRequested = await invoke("agent_cancel");
-		if (agentCancelRequested) setAgentState("正在停止本地进程…", "busy");
+		const run = localAgentRuns.find((item) => item.id === activeAgentRunId);
+		if (run) {
+			run.status = "停止中";
+			run.updatedAt = Math.floor(Date.now() / 1000);
+			renderAgentWorks();
+		}
 	} catch (error) {
-		setAgentState("停止失败", "error");
-		appendAgentMessage("system", String(error));
+		console.error("停止 Agent 失败", error);
 	}
 }
 
@@ -500,32 +585,207 @@ function markError(message) {
 }
 
 function scheduleSave() {
-	if (!currentFile) return;
+	if (!currentFile && !currentAgentDocument) return;
 	if (saveTimer) clearTimeout(saveTimer);
 	saveTimer = setTimeout(saveCurrent, 650);
 }
 
 async function saveCurrent() {
-	if (!currentFile) return;
+	if (!currentFile && !currentAgentDocument) return;
 	if (saveTimer) {
 		clearTimeout(saveTimer);
 		saveTimer = null;
 	}
 	try {
-		await invoke("write_markdown", {
-			path: currentFile,
-			content: editor.value,
-		});
+		if (currentAgentDocument) {
+			currentAgentDocument = await invoke("write_agent_work", {
+				input: { id: currentAgentDocument.id, content: editor.value },
+			});
+		} else {
+			await invoke("write_markdown", {
+				path: currentFile,
+				content: editor.value,
+			});
+		}
 		markSaved();
-		if (autoSync) scheduleAutoSync();
+		if (currentFile && autoSync) scheduleAutoSync();
+		if (agentMode) await loadAgentWorks();
 	} catch (error) {
 		console.error(error);
 		markError("保存失败");
 	}
 }
 
+function updateLibrarySummary(result) {
+	librarySources = result.sources || [];
+	libraryStatsData = {
+		total_documents: result.total_documents || 0,
+		unique_documents: result.unique_documents || 0,
+	};
+	const sourceCount = librarySources.length;
+	libraryStats.textContent = sourceCount
+		? `${sourceCount} 个来源 · ${libraryStatsData.total_documents.toLocaleString()} 篇 · 去重后 ${libraryStatsData.unique_documents.toLocaleString()} 篇`
+		: "尚未添加资料源";
+	if (result.warnings?.length) libraryStats.title = result.warnings.join("\n");
+	else libraryStats.removeAttribute("title");
+	renderWorksetSummary();
+}
+
+function renderLibraryHome() {
+	treeEl.replaceChildren();
+	if (!librarySources.length) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip";
+		tip.textContent = "还没有资料源。点击右上角 ＋ 添加外部 Markdown 目录。";
+		treeEl.appendChild(tip);
+		return;
+	}
+	const fragment = document.createDocumentFragment();
+	for (const source of librarySources) {
+		const row = document.createElement("div");
+		row.className = `library-source${source.available ? "" : " unavailable"}`;
+		row.title = source.root;
+		const name = document.createElement("div");
+		name.className = "library-source-name";
+		const label = document.createElement("span");
+		label.textContent = source.name;
+		const count = document.createElement("span");
+		count.className = "library-source-count";
+		count.textContent = source.available
+			? `${source.documents.toLocaleString()} 篇`
+			: "目录不可用";
+		name.append(label, count);
+		const root = document.createElement("div");
+		root.className = "library-source-root";
+		root.textContent = source.root;
+		row.append(name, root);
+		fragment.appendChild(row);
+	}
+	treeEl.appendChild(fragment);
+}
+
+function renderLibrarySearchResults(hits) {
+	treeEl.replaceChildren();
+	if (!hits.length) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip";
+		tip.textContent = "没有匹配的资料";
+		treeEl.appendChild(tip);
+		return;
+	}
+	const fragment = document.createDocumentFragment();
+	for (const hit of hits) {
+		const row = document.createElement("div");
+		row.className = "library-hit";
+		const open = document.createElement("button");
+		open.type = "button";
+		open.className = "tree-file library-hit-open";
+		open.title = hit.uri;
+		const title = document.createElement("span");
+		title.className = "hit-title";
+		title.textContent = hit.title;
+		const snippet = document.createElement("span");
+		snippet.className = "hit-snippet";
+		snippet.textContent = `${hit.source_name} · ${hit.relative_path}\n${hit.snippet || ""}`;
+		open.append(title, snippet);
+		open.addEventListener("click", () => void openLibraryDocument(hit));
+
+		const actions = document.createElement("label");
+		actions.className = "library-hit-actions";
+		const checkbox = document.createElement("input");
+		checkbox.type = "checkbox";
+		checkbox.checked = libraryWorkset.has(hit.uri);
+		checkbox.title = "加入当前 Workset";
+		checkbox.addEventListener("change", () => {
+			if (checkbox.checked) libraryWorkset.set(hit.uri, hit);
+			else libraryWorkset.delete(hit.uri);
+			renderWorksetSummary();
+		});
+		actions.append(checkbox, document.createTextNode("引用"));
+		row.append(open, actions);
+		fragment.appendChild(row);
+	}
+	treeEl.appendChild(fragment);
+}
+
+async function refreshLibrary() {
+	try {
+		const result = await invoke("refresh_library");
+		updateLibrarySummary(result);
+		if (libraryMode) {
+			if (searchInput.value.trim()) await runSearch();
+			else renderLibraryHome();
+		}
+		return result;
+	} catch (error) {
+		console.error(error);
+		markError("资料库刷新失败");
+		return null;
+	}
+}
+
+async function addLibrarySource() {
+	try {
+		const result = await invoke("add_library_source");
+		updateLibrarySummary(result);
+		if (!libraryMode) await setSidebarMode("library");
+		else if (searchInput.value.trim()) await runSearch();
+		else renderLibraryHome();
+	} catch (error) {
+		if (String(error).includes("未选择")) return;
+		console.error(error);
+		markError("添加资料源失败");
+	}
+}
+
+async function setSidebarMode(mode) {
+	const nextLibraryMode = mode === "library";
+	const nextAgentMode = mode === "agent";
+	if (libraryMode === nextLibraryMode && agentMode === nextAgentMode) {
+		if (agentMode) await loadAgentWorks();
+		return;
+	}
+	libraryMode = nextLibraryMode;
+	agentMode = nextAgentMode;
+	workspaceTab.classList.toggle("active", !libraryMode && !agentMode);
+	libraryTab.classList.toggle("active", libraryMode);
+	agentTab.classList.toggle("active", agentMode);
+	workspaceTab.setAttribute("aria-selected", String(!libraryMode && !agentMode));
+	libraryTab.setAttribute("aria-selected", String(libraryMode));
+	agentTab.setAttribute("aria-selected", String(agentMode));
+	addLibrarySourceButton.hidden = !libraryMode;
+	newAgentWorkButton.hidden = !agentMode;
+	libraryMeta.hidden = !libraryMode;
+	agentMeta.hidden = !agentMode;
+	searchInput.placeholder = libraryMode
+		? "搜索资料库…"
+		: agentMode
+			? "搜索 Agent 工作…"
+			: "搜索全文（FTS）…";
+	searchInput.value = "";
+	clearTimeout(searchTimer);
+	renderWorksetSummary();
+	if (libraryMode) {
+		if (!librarySources.length) await refreshLibrary();
+		else renderLibraryHome();
+	} else if (agentMode) {
+		await loadAgentWorks();
+	} else if (lastTreeNodes.length) {
+		renderTree(lastTreeNodes);
+	} else {
+		treeEl.replaceChildren();
+	}
+}
+
 async function useWorkspace(data) {
 	if (!data) return;
+	editor.readOnly = false;
+	editor.classList.remove("readonly");
+	editorPaneLabel.textContent = "WRITE";
+	annotationButton.disabled = false;
+	aggregateButton.disabled = false;
+	currentLibraryDocument = null;
+	currentAgentDocument = null;
 	rootPath = data.root;
 	localStorage.setItem("stillwrite.rootPath", rootPath);
 	workspaceNameEl.textContent = basename(rootPath);
@@ -543,9 +803,11 @@ async function chooseWorkspace() {
 		const data = await invoke("choose_workspace");
 		if (!data) return;
 		currentFile = null;
+		currentAgentDocument = null;
 		editor.value = "";
 		updatePreview();
 		documentTitleEl.textContent = "Stillwrite";
+		await setSidebarMode("workspace");
 		await useWorkspace(data);
 		loadAnnotationPanel();
 	} catch (error) {
@@ -561,6 +823,8 @@ async function chooseDocument() {
 		const data = await invoke("choose_document");
 		if (!data) return;
 		currentFile = data.path;
+		currentAgentDocument = null;
+		await setSidebarMode("workspace");
 		await useWorkspace(data);
 		showDocument(data.path, data.name, data.content, null);
 	} catch (error) {
@@ -583,6 +847,14 @@ async function restoreWorkspace() {
 }
 
 async function refreshTree() {
+	if (libraryMode) {
+		await refreshLibrary();
+		return;
+	}
+	if (agentMode) {
+		await loadAgentWorks();
+		return;
+	}
 	if (!rootPath) return;
 	try {
 		const data = await invoke("set_workspace", { path: rootPath });
@@ -607,8 +879,49 @@ async function openFile(path, name, row) {
 	}
 }
 
+async function openLibraryDocument(hit) {
+	const token = ++loadToken;
+	await saveCurrent();
+	if (annotateDirty) await saveAnnotate();
+	try {
+		const data = await invoke("read_library_document", {
+			sourceId: hit.source_id,
+			relativePath: hit.relative_path,
+		});
+		if (token !== loadToken) return;
+		currentLibraryDocument = data;
+		currentFile = null;
+		currentAgentDocument = null;
+		editor.readOnly = true;
+		editor.classList.add("readonly");
+		editorPaneLabel.textContent = "READ ONLY · LIBRARY";
+		annotationButton.disabled = false;
+		aggregateButton.disabled = true;
+		annotationItems = [];
+		annotateLoadedDoc = null;
+		annotateDirty = false;
+		editor.value = data.content;
+		updatePreview();
+		documentTitleEl.textContent = data.title;
+		editor.scrollTop = 0;
+		previewEl.scrollTop = 0;
+		markReadonly();
+		await loadAnnotationPanel();
+	} catch (error) {
+		console.error(error);
+		markError("资料打开失败");
+	}
+}
+
 function showDocument(path, name, text, row) {
 	currentFile = path;
+	currentLibraryDocument = null;
+	currentAgentDocument = null;
+	editor.readOnly = false;
+	editor.classList.remove("readonly");
+	editorPaneLabel.textContent = "WRITE";
+	annotationButton.disabled = false;
+	aggregateButton.disabled = false;
 	editor.value = text;
 	updatePreview();
 	documentTitleEl.textContent = name.replace(/\.(md|markdown)$/i, "");
@@ -621,6 +934,120 @@ function showDocument(path, name, text, row) {
 	previewEl.scrollTop = 0;
 	markSaved();
 	loadAnnotationPanel();
+}
+
+function renderAgentWorks(items = allAgentWorkItems()) {
+	treeEl.replaceChildren();
+	agentStats.textContent = agentWorkItems.length
+		? `${agentWorkItems.length} 个工作${localAgentRuns.length ? ` · ${localAgentRuns.length} 个运行中` : ""}`
+		: localAgentRuns.length
+			? `${localAgentRuns.length} 个运行中`
+			: "还没有 Agent 工作";
+	if (!items.length) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip agent-empty-tip";
+		tip.textContent = searchInput.value.trim()
+			? "没有匹配的 Agent 工作"
+			: "还没有 Agent 工作。选中文字后点“问 Agent”，结果会在这里成为可编辑文档。";
+		treeEl.appendChild(tip);
+		return;
+	}
+	const fragment = document.createDocumentFragment();
+	for (const item of items) {
+		const row = document.createElement("div");
+		row.className = `agent-work-item${item.id === currentAgentDocument?.id ? " active" : ""}`;
+		const open = document.createElement("button");
+		open.type = "button";
+		open.className = "agent-work-open";
+		const title = document.createElement("strong");
+		title.className = "agent-work-title";
+		title.textContent = item.title || "Agent 工作";
+		const meta = document.createElement("span");
+		meta.className = "agent-work-meta";
+		const status = item.status || "已完成";
+		meta.textContent = `${status} · ${formatAgentTime(item.updatedAt)}`;
+		const origin = document.createElement("span");
+		origin.className = "agent-work-origin";
+		origin.textContent = item.originQuote
+			? `“${item.originQuote.slice(0, 56)}${item.originQuote.length > 56 ? "…" : ""}”`
+			: item.originUri || item.prompt || "独立 Agent 工作";
+		open.append(title, meta, origin);
+		open.addEventListener("click", () => {
+			if (item.local) return;
+			void openAgentWork(item);
+		});
+		row.appendChild(open);
+		if (item.local && agentBusy) {
+			const stop = document.createElement("button");
+			stop.type = "button";
+			stop.className = "agent-work-stop";
+			stop.textContent = "停止";
+			stop.title = "停止等待本地 Agent 进程";
+			stop.addEventListener("click", () => void cancelAgentTurn());
+			row.appendChild(stop);
+		}
+		fragment.appendChild(row);
+	}
+	treeEl.appendChild(fragment);
+}
+
+async function loadAgentWorks() {
+	if (!rootPath) {
+		agentWorkItems = [];
+		renderAgentWorks();
+		return;
+	}
+	try {
+		agentWorkItems = await invoke("list_agent_works");
+		const query = searchInput.value.trim().toLocaleLowerCase();
+		const items = query
+			? allAgentWorkItems().filter((item) =>
+				[item.title, item.prompt, item.originUri, item.originQuote]
+						.filter(Boolean)
+						.join("\n")
+						.toLocaleLowerCase()
+						.includes(query),
+			  )
+			: allAgentWorkItems();
+		renderAgentWorks(items);
+	} catch (error) {
+		console.error("读取 Agent 工作失败", error);
+		agentWorkItems = [];
+		renderAgentWorks();
+	}
+}
+
+async function openAgentWork(item) {
+	const token = ++loadToken;
+	await saveCurrent();
+	if (annotateDirty) await saveAnnotate();
+	try {
+		const data = await invoke("read_agent_work", { id: item.id });
+		if (token !== loadToken) return;
+		showAgentDocument(data);
+	} catch (error) {
+		console.error(error);
+		markError("Agent 文档打开失败");
+	}
+}
+
+function showAgentDocument(data) {
+	currentAgentDocument = data;
+	currentFile = null;
+	currentLibraryDocument = null;
+	editor.readOnly = false;
+	editor.classList.remove("readonly");
+	editorPaneLabel.textContent = "WRITE · AGENT";
+	annotationButton.disabled = false;
+	aggregateButton.disabled = true;
+	editor.value = data.content || "";
+	updatePreview();
+	documentTitleEl.textContent = data.title || "Agent 工作";
+	editor.scrollTop = 0;
+	previewEl.scrollTop = 0;
+	markSaved();
+	loadAnnotationPanel();
+	if (agentMode) renderAgentWorks();
 }
 
 async function createFile(relativePath) {
@@ -880,7 +1307,7 @@ function highlightAnnotation(item, ordinal) {
 
 function renderAnnotationAnchors() {
 	unwrapAnnotationHighlights();
-	if (annotateLoadedDoc !== currentFile) return;
+	if (annotateLoadedDoc !== documentRefKey()) return;
 	annotationItems.forEach((item, index) => {
 		const resolved = AnnotationCodec.resolveRange(editor.value, item);
 		if (resolved.start >= 0) {
@@ -923,8 +1350,124 @@ function captureEditorAnnotation() {
 	return range.quote.trim() ? range : null;
 }
 
+async function beginAgentQuestion(range = null, { allowEmpty = false } = {}) {
+	const target = currentDocumentRef();
+	if (!target && !allowEmpty) {
+		saveStateEl.textContent = "请先打开文档";
+		return;
+	}
+	const captured = range || (target ? captureEditorAnnotation() : null);
+	if (target && !captured?.quote?.trim() && !allowEmpty) {
+		saveStateEl.textContent = "请先选择字句，或把光标放进一个段落";
+		return;
+	}
+	pendingAgentRequest = {
+		target,
+		originUri: target ? currentDocumentUri() : null,
+		originQuote: captured?.quote?.trim() || null,
+	};
+	agentAskTitle.textContent = pendingAgentRequest.originQuote
+		? "问 Agent"
+		: "新 Agent 工作";
+	agentAskContext.hidden = !pendingAgentRequest.originQuote;
+	agentAskQuote.textContent = pendingAgentRequest.originQuote || "";
+	agentAskPrompt.value = "";
+	agentAskSend.disabled = false;
+	agentAskDialog.showModal();
+	requestAnimationFrame(() => agentAskPrompt.focus());
+}
+
+function addCompletedAgentWork(document) {
+	const summary = {
+		id: document.id,
+		uri: document.uri,
+		title: document.title,
+		prompt: document.prompt,
+		originUri: document.originUri,
+		originQuote: document.originQuote,
+		createdAt: document.createdAt,
+		updatedAt: document.updatedAt,
+		status: document.status || "已完成",
+		threadId: document.threadId,
+	};
+	agentWorkItems = [summary, ...agentWorkItems.filter((item) => item.id !== summary.id)];
+}
+
+async function submitAgentQuestion(event) {
+	event.preventDefault();
+	if (agentBusy) return;
+	const prompt = agentAskPrompt.value.trim();
+	if (!prompt) {
+		agentAskPrompt.focus();
+		return;
+	}
+	const request = pendingAgentRequest || { originUri: null, originQuote: null };
+	agentAskDialog.close();
+	if (!rootPath) {
+		await chooseWorkspace();
+		if (!rootPath) return;
+	}
+	await saveCurrent();
+	const run = makeLocalAgentRun(request, prompt);
+	localAgentRuns.unshift(run);
+	activeAgentRunId = run.id;
+	agentBusy = true;
+	agentCancelRequested = false;
+	if (agentMode) renderAgentWorks();
+	saveStateEl.textContent = "Agent 运行中…";
+	saveStateEl.classList.remove("error");
+	try {
+		await probeAgent();
+		const worksetContext = await loadWorksetContext();
+		const response = await invoke("agent_turn", {
+			input: {
+				prompt: buildAgentPrompt(request, prompt, worksetContext),
+				sessionId: agentSessionId,
+				messageId: globalThis.crypto?.randomUUID?.() || `msg-${Date.now()}`,
+			},
+		});
+		if (response.status === "error")
+			throw new Error(response.text || "Agent 返回错误");
+		const title = agentWorkTitle(prompt);
+		const document = await invoke("create_agent_work", {
+			input: {
+				title,
+				content: agentDocumentContent(response.text, title),
+				prompt,
+				originUri: request.originUri,
+				originQuote: request.originQuote,
+				threadId: response.threadId,
+				conversationId: response.conversationId,
+				runId: response.runId,
+				receiptRef: response.receiptRef,
+			},
+		});
+		addCompletedAgentWork(document);
+		localAgentRuns = localAgentRuns.filter((item) => item.id !== run.id);
+		if (agentMode) renderAgentWorks();
+		saveStateEl.textContent = "Agent 工作已完成";
+	} catch (error) {
+		console.error("Agent 工作失败", error);
+		const local = localAgentRuns.find((item) => item.id === run.id);
+		if (local) {
+			local.status = agentCancelRequested ? "已停止" : "失败";
+			local.error = String(error);
+			local.updatedAt = Math.floor(Date.now() / 1000);
+		}
+		if (agentMode) renderAgentWorks();
+		markError(agentCancelRequested ? "Agent 已停止" : "Agent 失败");
+	} finally {
+		agentBusy = false;
+		activeAgentRunId = null;
+		agentCancelRequested = false;
+		pendingAgentRequest = null;
+		if (agentMode) renderAgentWorks();
+	}
+}
+
 async function beginAnnotation(range = null) {
-	if (!currentFile || !isAnnotatablePath(currentFile)) {
+	const target = currentDocumentRef();
+	if (!target || (target.kind === "workspace" && !isAnnotatablePath(currentFile))) {
 		annotateFoot.textContent = currentFile
 			? "批注文件本身不能再批注"
 			: "请先打开一篇文档";
@@ -935,7 +1478,11 @@ async function beginAnnotation(range = null) {
 		annotateFoot.textContent = "请先选择字句，或把光标放进一个段落";
 		return;
 	}
-	if (annotateLoadedDoc !== currentFile) await loadAnnotationPanel();
+	if (annotateLoadedDoc !== documentRefKey(target)) await loadAnnotationPanel();
+	if (annotateLoadedDoc !== documentRefKey(target)) {
+		annotateFoot.textContent = "批注尚未加载完成，请稍后重试";
+		return;
+	}
 	pendingAnnotation = captured;
 	setAnnotateVisible(true);
 	annotateComposer.hidden = false;
@@ -992,8 +1539,12 @@ function deleteAnnotation(id) {
 
 // 读取当前文档的批注；旧版整篇自由文本会自动转换为“全文批注”。
 async function loadAnnotationPanel() {
-	const requestedFile = currentFile;
-	if (!requestedFile) {
+	const loadTokenForAnnotation = ++annotationLoadToken;
+	const target = currentDocumentRef();
+	const requestedKey = documentRefKey(target);
+	const libraryDocument = target?.kind === "library" ? currentLibraryDocument : null;
+	const agentDocument = target?.kind === "agent" ? currentAgentDocument : null;
+	if (!target) {
 		annotateDocName.textContent = "未打开文档";
 		annotateDocPath.textContent = "";
 		annotationItems = [];
@@ -1006,35 +1557,82 @@ async function loadAnnotationPanel() {
 		return;
 	}
 	try {
-		const data = await invoke("read_annotation", { docPath: requestedFile });
-		if (requestedFile !== currentFile) return;
+		const data = await invoke("read_annotation", { target });
+		if (
+			loadTokenForAnnotation !== annotationLoadToken ||
+			requestedKey !== documentRefKey()
+		)
+			return;
 		annotationItems = AnnotationCodec.parse(data.body || "", data.updated_at || "");
-		annotateLoadedDoc = requestedFile;
+		annotateLoadedDoc = requestedKey;
 		activeAnnotationId = null;
-		annotateDocName.textContent = basename(requestedFile).replace(
-			/\.(md|markdown)$/i,
-			"",
-		);
-		annotateDocPath.textContent = relativeDocumentPath(requestedFile);
-		annotateDocPath.title = requestedFile;
+		annotateDocName.textContent = target.kind === "workspace"
+			? basename(target.path).replace(/\.(md|markdown)$/i, "")
+			: target.kind === "library"
+				? data.title || libraryDocument?.title || target.relativePath
+				: data.title || agentDocument?.title || "Agent 工作";
+		annotateDocPath.textContent = target.kind === "workspace"
+			? relativeDocumentPath(target.path)
+			: target.kind === "library"
+				? data.doc_path || libraryDocument?.uri || target.relativePath
+				: data.doc_path || agentDocument?.uri || target.id;
+		annotateDocPath.title = target.kind === "workspace"
+			? target.path
+			: target.kind === "library"
+				? data.doc_path || libraryDocument?.uri || target.relativePath
+				: data.doc_path || agentDocument?.uri || target.id;
 		annotateDirty = false;
 		cancelAnnotation();
 		renderAnnotationPanel();
 		renderAnnotationAnchors();
 		annotateSaveState.textContent = annotationItems.length ? "已保存" : "";
 		annotateSaveState.classList.remove("dirty", "error");
-		annotateFoot.textContent = "批注保存在「批注/」，随文档同步。";
+		annotateFoot.textContent = target.kind === "workspace"
+			? "批注保存在「批注/」，随文档同步。"
+			: target.kind === "library"
+				? "资料正文只读；批注保存在 StillWrite 应用数据中。"
+				: "Agent 工作可编辑；批注保存在 StillWrite 应用数据中。";
 	} catch (error) {
+		if (
+			loadTokenForAnnotation !== annotationLoadToken ||
+			requestedKey !== documentRefKey()
+		)
+			return;
 		console.error(error);
 		annotationItems = [];
-		annotateLoadedDoc = requestedFile;
+		// 读取失败时不能把文档标记为已加载，否则“新批注”会进入内存，
+		// 随后保存必然失败，还会留下看似属于“未打开文档”的批注。
+		annotateLoadedDoc = null;
 		activeAnnotationId = null;
 		cancelAnnotation();
+		annotateDocName.textContent = target.kind === "workspace"
+			? basename(target.path).replace(/\.(md|markdown)$/i, "")
+			: target.kind === "library"
+				? libraryDocument?.title || target.relativePath
+				: agentDocument?.title || "Agent 工作";
+		annotateDocPath.textContent = target.kind === "workspace"
+			? relativeDocumentPath(target.path)
+			: target.kind === "library"
+				? libraryDocument?.uri || target.relativePath
+				: agentDocument?.uri || target.id;
+		annotateDocPath.title = target.kind === "workspace"
+			? target.path
+			: target.kind === "library"
+				? libraryDocument?.uri || target.relativePath
+				: agentDocument?.uri || target.id;
 		renderAnnotationPanel();
 		renderAnnotationAnchors();
+		annotateSaveState.textContent = "读取批注失败";
+		annotateSaveState.classList.remove("dirty");
+		annotateSaveState.classList.add("error");
+		annotateSaveState.title = String(error);
 		annotateFoot.textContent = String(error).includes("不能再写批注")
 			? "批注文件本身不能再批注"
-			: "读取批注失败";
+			: target.kind === "library"
+				? "资料批注读取失败，请刷新资料库后重试"
+				: target.kind === "agent"
+					? "Agent 批注读取失败"
+					: "读取批注失败";
 	}
 }
 
@@ -1046,24 +1644,25 @@ function markAnnotateDirty() {
 }
 
 function scheduleAnnotateSave() {
-	if (!currentFile) return;
+	if (!currentDocumentRef()) return;
 	if (annotateTimer) clearTimeout(annotateTimer);
 	annotateTimer = setTimeout(saveAnnotate, 650);
 }
 
 async function saveAnnotate() {
-	if (!currentFile || annotateLoadedDoc !== currentFile) return;
+	const target = currentDocumentRef();
+	if (!target || annotateLoadedDoc !== documentRefKey(target)) return;
 	if (annotateTimer) {
 		clearTimeout(annotateTimer);
 		annotateTimer = null;
 	}
 	const body = AnnotationCodec.serialize(annotationItems);
 	try {
-		await invoke("save_annotation", { docPath: currentFile, body });
+		await invoke("save_annotation", { target, body });
 		annotateSaveState.textContent = annotationItems.length ? "已保存" : "";
 		annotateSaveState.classList.remove("dirty", "error");
 		annotateDirty = false;
-		if (autoSync) scheduleAutoSync();
+		if (target.kind === "workspace" && autoSync) scheduleAutoSync();
 	} catch (error) {
 		console.error(error);
 		annotateSaveState.textContent = "保存失败";
@@ -1072,7 +1671,7 @@ async function saveAnnotate() {
 }
 
 function hideSelectionAnnotate() {
-	selectionAnnotateButton.hidden = true;
+	selectionActions.hidden = true;
 	pendingPreviewSelection = null;
 }
 
@@ -1105,9 +1704,9 @@ function showPreviewSelectionAction() {
 	}
 	pendingPreviewSelection = sourceRangeForPreviewSelection(quote);
 	const rect = range.getBoundingClientRect();
-	selectionAnnotateButton.style.left = `${Math.min(window.innerWidth - 82, Math.max(8, rect.left + rect.width / 2 - 34))}px`;
-	selectionAnnotateButton.style.top = `${Math.max(8, rect.top - 40)}px`;
-	selectionAnnotateButton.hidden = false;
+	selectionActions.style.left = `${Math.min(window.innerWidth - 180, Math.max(8, rect.left + rect.width / 2 - 78))}px`;
+	selectionActions.style.top = `${Math.max(8, rect.top - 42)}px`;
+	selectionActions.hidden = false;
 }
 
 // 源文档是否允许批注（批注文件与汇总文件自身不能再批注）
@@ -1126,6 +1725,12 @@ function samePath(a, b) {
 
 async function doAggregateAnnotations() {
 	if (!rootPath) return;
+	if (currentLibraryDocument || currentAgentDocument) {
+		annotateFoot.textContent = currentLibraryDocument
+			? "资料批注不写入 Workspace 汇总"
+			: "Agent 批注不写入 Workspace 汇总";
+		return;
+	}
 	// 先落盘待保存的批注：刚打完字就点汇总时，650ms 防抖可能还没触发
 	if (currentFile && isAnnotatablePath(currentFile) && annotateDirty)
 		await saveAnnotate();
@@ -1149,24 +1754,36 @@ async function doAggregateAnnotations() {
 	}
 }
 
+function updateRightPanelHandle() {
+	annotateHandle.classList.toggle("hidden", !annotateVisible);
+	annotateHandle.title = "拖动调整批注栏";
+}
+
 function setAnnotateVisible(visible) {
 	annotateVisible = visible;
 	localStorage.setItem("stillwrite.annotateVisible", String(visible));
 	annotationButton.classList.toggle("active", visible);
 	annotatePanel.hidden = !visible;
 	annotatePanel.classList.toggle("hidden", !visible);
-	annotateHandle.classList.toggle("hidden", !visible);
 	document.documentElement.style.setProperty(
 		"--annotate-width",
 		`${annotateWidth}px`,
 	);
-	if (visible && annotateLoadedDoc !== currentFile) loadAnnotationPanel();
+	updateRightPanelHandle();
+	if (visible && annotateLoadedDoc !== documentRefKey()) loadAnnotationPanel();
 }
 
 function clearSearch() {
 	searchInput.value = "";
-	if (lastTreeNodes.length) renderTree(lastTreeNodes);
-	else treeEl.replaceChildren();
+	if (libraryMode) {
+		renderLibraryHome();
+	} else if (agentMode) {
+		renderAgentWorks();
+	} else if (lastTreeNodes.length) {
+		renderTree(lastTreeNodes);
+	} else {
+		treeEl.replaceChildren();
+	}
 }
 
 async function runSearch() {
@@ -1176,8 +1793,15 @@ async function runSearch() {
 		return;
 	}
 	try {
-		const hits = await invoke("search_index", { query, limit: 30 });
-		renderSearchResults(hits);
+		if (libraryMode) {
+			const hits = await invoke("search_library", { query, limit: 30 });
+			renderLibrarySearchResults(hits);
+		} else if (agentMode) {
+			await loadAgentWorks();
+		} else {
+			const hits = await invoke("search_index", { query, limit: 30 });
+			renderSearchResults(hits);
+		}
 	} catch (error) {
 		console.error(error);
 	}
@@ -1307,8 +1931,8 @@ function applyLayout() {
 	sidebarHandle.classList.toggle("hidden", !sidebarVisible);
 	annotatePanel.classList.toggle("hidden", !annotateVisible);
 	annotatePanel.hidden = !annotateVisible;
-	annotateHandle.classList.toggle("hidden", !annotateVisible);
 	annotationButton.classList.toggle("active", annotateVisible);
+	updateRightPanelHandle();
 	shell.dataset.mode = viewMode;
 	document.querySelectorAll("[data-view]").forEach((button) => {
 		button.classList.toggle("active", button.dataset.view === viewMode);
@@ -1399,6 +2023,7 @@ editor.addEventListener("input", () => {
 });
 
 editor.addEventListener("keydown", (event) => {
+	if (editor.readOnly) return;
 	if (event.key === "Tab") {
 		event.preventDefault();
 		const start = editor.selectionStart;
@@ -1415,6 +2040,16 @@ document
 	.querySelector("#openDocument")
 	.addEventListener("click", chooseDocument);
 document.querySelector("#refreshTree").addEventListener("click", refreshTree);
+workspaceTab.addEventListener("click", () => void setSidebarMode("workspace"));
+libraryTab.addEventListener("click", () => void setSidebarMode("library"));
+agentTab.addEventListener("click", () => void setSidebarMode("agent"));
+addLibrarySourceButton.addEventListener("click", addLibrarySource);
+newAgentWorkButton.addEventListener("click", () => void beginAgentQuestion(null, { allowEmpty: true }));
+clearWorksetButton.addEventListener("click", () => {
+	libraryWorkset.clear();
+	renderWorksetSummary();
+	if (libraryMode && searchInput.value.trim()) void runSearch();
+});
 document.querySelector("#refreshMenu").addEventListener("click", refreshTree);
 document.querySelector("#saveDocument").addEventListener("click", saveCurrent);
 fileMenuButton.addEventListener("click", () => setFileMenuOpen(fileMenu.hidden));
@@ -1438,15 +2073,11 @@ document.querySelector("#newFile").addEventListener("click", async () => {
 });
 
 document.querySelector("#syncButton").addEventListener("click", doSync);
-agentButton.addEventListener("click", () => setAgentPanelVisible(agentPanel.hidden));
-closeAgent.addEventListener("click", () => setAgentPanelVisible(false));
-agentSend.addEventListener("click", sendAgentTurn);
-agentCancel.addEventListener("click", cancelAgentTurn);
-agentPrompt.addEventListener("keydown", (event) => {
-	if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-		event.preventDefault();
-		sendAgentTurn();
-	}
+askAgentButton.addEventListener("click", () => void beginAgentQuestion());
+agentAskForm.addEventListener("submit", submitAgentQuestion);
+agentAskCancel.addEventListener("click", () => {
+	pendingAgentRequest = null;
+	agentAskDialog.close();
 });
 annotationButton.addEventListener("click", () => {
 	const hasSelection = editor.selectionStart !== editor.selectionEnd;
@@ -1492,15 +2123,23 @@ previewEl.addEventListener("click", (event) => {
 selectionAnnotateButton.addEventListener("pointerdown", (event) => {
 	event.preventDefault();
 });
+selectionAgentButton.addEventListener("pointerdown", (event) => {
+	event.preventDefault();
+});
 selectionAnnotateButton.addEventListener("click", () => {
 	const range = pendingPreviewSelection;
 	hideSelectionAnnotate();
 	if (range) beginAnnotation(range);
 });
+selectionAgentButton.addEventListener("click", () => {
+	const range = pendingPreviewSelection;
+	hideSelectionAnnotate();
+	if (range) void beginAgentQuestion(range);
+});
 document.addEventListener("pointerdown", (event) => {
 	if (
-		!selectionAnnotateButton.hidden &&
-		!selectionAnnotateButton.contains(event.target) &&
+		!selectionActions.hidden &&
+		!selectionActions.contains(event.target) &&
 		!previewEl.contains(event.target)
 	)
 		hideSelectionAnnotate();

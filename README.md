@@ -13,7 +13,8 @@
 - 文件菜单支持打开文件夹、直接打开 Markdown、新建、保存和刷新目录。
 - 650ms 防抖自动保存，支持 `Ctrl+S`。
 - 记住上次目录、侧栏宽度、双栏比例和视图模式。
-- 不使用数据库、账号、云同步、React、Vite、Node 服务或 localhost。
+- 正文仍是唯一内容源；SQLite 只做可删除重建的 Workspace / Library 侧车索引。
+- 不使用账号、React、Vite、Node 服务或 localhost。
 
 ## v0.2 原型：全文搜索 + git 同步（本分支新增）
 
@@ -75,11 +76,29 @@ ssh user@example.invalid "git --version"
 - `汇总批注` 一键把全部批注合并到工作区根目录 `批注汇总.md`（按相对路径顺序、只纳非空、自动生成可重复覆盖；文件菜单里也有入口）。
 - 批注清空即删除侧车文件（撤销批注）；批注文件与汇总文件自身不能再批注；删除 `批注/` 文件夹即可整体撤销功能。
 
-### 常住 Agent 工作台
+## v0.4 原型：Library / 资料库
 
-工具栏里的 `Agent` 是常驻入口，不依赖临时实验面板。它通过本地
-`zuaef-agent` 的 `stillwrite` surface 发起一次自然语言 turn，返回文本、会话/运行
-标识和 receipt；停止按钮只停止当前本地进程，不宣称撤销已经发生的外部效果。
+Library 是 Workspace 之外的只读资料层，不是 RSS 阅读器，也不会把外部资料塞进工作区文件树：
+
+- 侧栏切换到 `资料`，点击 `＋` 注册一个外部 Markdown 目录（资料源不能与当前工作区重叠）。
+- StillWrite 只扫描已注册目录，按 `mtime + size` 增量更新独立的 `library/index.db`；正文继续留在原始 `.md` 文件。
+- Library 使用 SHA-256 对规范化后的 Markdown 内容去重；重复文件仍保留在原目录，但搜索结果只显示一个 corpus item。
+- 搜索结果勾选“引用”即可加入当前 Workset。打开资料时正文仍只读，但可以使用与 Workspace 完全相同的选取、批注、高亮和批注面板。
+- Library 批注使用同一套 Markdown 批注格式，写入 StillWrite 应用数据目录，不修改外部资料，也不进入 Workspace 文件树、git 同步或 Workspace 汇总。
+- 发送 Agent 请求时，StillWrite 才读取 Workset 资料及其批注，并把它们作为有边界的只读引用传入。
+- 刷新会清理已删除文件的索引；SQLite 可直接删除，下一次刷新会从资料源重建。
+
+Library 的目标边界是：`Library ≠ Workspace`、`Workset ≠ Library`、`Index ≠ Content`。当前版本暂不包含 RSS 网络抓取、Embedding、标签、自动分类和摘要。
+
+## v0.5 原型：Agent Work / Agent 工作
+
+Agent 不是右侧常驻聊天框，而是由文档选区触发、最终落成 Markdown 的工作文档：
+
+- 侧栏现在有 `文件 / 资料 / Agent` 三个平面；`Agent` 列表只显示工作标题、来源选区和运行状态，不把 Workspace 文件树或 Library 展开成第二棵目录树。
+- 在阅读区选中文字后，浮层会同时提供 `＋批注` 与 `问 Agent`。工具栏里的 `问 Agent` 也可围绕当前段落发起请求；`Agent` 侧栏的 `＋` 用于新建独立工作。
+- Agent 结果保存为当前 Workspace 对应的独立 Markdown 工作文档，正文在 StillWrite 应用数据目录，不进入 Workspace 文件树、git 或 Library。打开后与其他文档共用同一个编辑器、阅读区、选区、高亮和批注系统。
+- Agent 工作的来源选区、请求和运行标识只保存在最小 JSON 侧车；正文仍是 Markdown。工作运行时列表显示状态，完成后用户点击列表项再打开结果，不打断当前写作。
+- 当前 Agent backend 仍通过本地 `zuaef-agent` 的 `stillwrite` surface 发起一次自然语言 turn，返回文本、会话/运行标识和 receipt；停止按钮只停止当前本地进程，不宣称撤销已经发生的外部效果。
 
 启动器按以下顺序发现：
 
@@ -188,13 +207,15 @@ stillwrite/
 │   ├── annotations.test.js # 批注格式与锚点单元测试
 │   ├── document-links.js # URL 与项目内 Markdown 名称/路径识别和跳转
 │   ├── document-links.test.js # 内外链接识别与相对路径解析测试
-│   ├── app.js          # 文件树、搜索、同步、自动保存、Markdown 预览、布局、批注
-│   └── style.css       # 沉浸式双栏视觉 + 批注栏
+│   ├── app.js          # 文件树、Library、搜索、Workset、同步、预览、布局、批注
+│   └── style.css       # 沉浸式双栏视觉 + 批注栏 + 资料库
 └── src-tauri/
     ├── src/lib.rs      # 文件夹/文档选择 + 工作区边界 + 文件读写 + Tauri command 注册
     ├── src/annotate.rs # 批注侧车：读写 `批注/`（标注来源/时间）+ 汇总 `批注汇总.md`
-    ├── src/agent.rs    # 常驻 Agent：本地 launcher、stillwrite surface、取消与 receipt 校验
+    ├── src/agent.rs    # Agent backend：本地 launcher、stillwrite surface、取消与 receipt 校验
+    ├── src/agent_work.rs # Agent Markdown 工作文档与来源/运行侧车
     ├── src/indexer.rs  # SQLite FTS5 侧车索引（rusqlite bundled）
+    ├── src/library.rs   # 外部 Markdown 资料源、增量索引、SHA-256 去重、只读读取
     ├── src/sync.rs     # git 同步引擎（最后写入者胜 + 单测 + 板子集成测试）
     ├── capabilities/   # 最小 IPC 权限
     └── tauri.conf.json # 直接把 ../ui 嵌入桌面应用

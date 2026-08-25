@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Write,
@@ -11,7 +11,9 @@ use tauri_plugin_dialog::DialogExt;
 
 pub mod annotate;
 mod agent;
+mod agent_work;
 mod indexer;
+mod library;
 mod sync;
 
 #[derive(Default)]
@@ -43,6 +45,43 @@ struct OpenDocumentData {
     path: String,
     name: String,
     content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum AnnotationTarget {
+    Workspace { path: String },
+    Library {
+        source_id: String,
+        relative_path: String,
+        content_hash: String,
+    },
+    Agent { id: String },
+}
+
+fn library_annotation_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("无法定位资料批注目录: {e}"))?
+        .join("library")
+        .join("annotations");
+    fs::create_dir_all(&root).map_err(|e| format!("创建资料批注目录失败: {e}"))?;
+    Ok(root)
+}
+
+fn library_annotation_document(
+    app: &AppHandle,
+    source_id: &str,
+    relative_path: &str,
+    content_hash: &str,
+) -> Result<library::LibraryDocument, String> {
+    let db_path = library::resolve_index_db(app)?;
+    let document = library::read_at(&db_path, source_id, relative_path)?;
+    if document.content_hash != content_hash {
+        return Err("资料内容已变化，请刷新资料库后再操作批注".into());
+    }
+    Ok(document)
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -466,19 +505,157 @@ async fn search_index(
     })
 }
 
+/// 注册一个位于工作区之外的 Markdown 资料目录，并立即做一次增量索引。
+#[tauri::command]
+async fn add_library_source(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<library::LibraryRefreshResult, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("选择资料目录")
+        .blocking_pick_folder();
+    let Some(selected) = selected else {
+        return Err("未选择资料目录".into());
+    };
+    let path = selected
+        .into_path()
+        .map_err(|e| format!("资料目录路径不可用: {e}"))?;
+    let root = library::canonical_source_root(&path)?;
+    if let Ok(workspace) = workspace_root(&state) {
+        if library::roots_overlap(&root, &workspace) {
+            return Err("资料源不能与当前工作区重叠".into());
+        }
+    }
+    let db_path = library::resolve_index_db(&app)?;
+    tauri::async_runtime::spawn_blocking(move || library::register_source_at(&db_path, &root))
+        .await
+        .map_err(|e| format!("资料源索引任务异常: {e}"))?
+}
+
+/// 刷新所有已注册资料源；正文仍从资料源原目录读取。
+#[tauri::command]
+async fn refresh_library(app: AppHandle) -> Result<library::LibraryRefreshResult, String> {
+    let db_path = library::resolve_index_db(&app)?;
+    tauri::async_runtime::spawn_blocking(move || library::refresh_at(&db_path))
+        .await
+        .map_err(|e| format!("资料库刷新任务异常: {e}"))?
+}
+
+#[tauri::command]
+async fn search_library(
+    app: AppHandle,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<library::LibrarySearchHit>, String> {
+    let db_path = library::resolve_index_db(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        library::search_at(&db_path, &query, limit.unwrap_or(30))
+    })
+    .await
+    .map_err(|e| format!("资料搜索任务异常: {e}"))?
+}
+
+/// 只读打开已注册且已索引的 Library Markdown 文档。
+#[tauri::command]
+async fn read_library_document(
+    app: AppHandle,
+    source_id: String,
+    relative_path: String,
+) -> Result<library::LibraryDocument, String> {
+    let db_path = library::resolve_index_db(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        library::read_at(&db_path, &source_id, &relative_path)
+    })
+    .await
+    .map_err(|e| format!("读取资料任务异常: {e}"))?
+}
+
+/// 列出当前 Workspace 对应的 Agent 工作文档。
+#[tauri::command]
+async fn list_agent_works(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<agent_work::AgentWorkSummary>, String> {
+    let root = workspace_root(&state)?;
+    agent_work::list(&app, &root)
+}
+
+/// 读取一个 Agent 工作文档；正文仍是 Markdown，只是存放在应用数据中。
+#[tauri::command]
+async fn read_agent_work(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<agent_work::AgentWorkDocument, String> {
+    let root = workspace_root(&state)?;
+    agent_work::read_at(&app, &root, &id)
+}
+
+/// 创建一个 Agent 工作文档，并保存最小的来源/运行侧车。
+#[tauri::command]
+async fn create_agent_work(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: agent_work::CreateAgentWorkInput,
+) -> Result<agent_work::AgentWorkDocument, String> {
+    let root = workspace_root(&state)?;
+    agent_work::create(&app, &root, input)
+}
+
+/// 保存 Agent 工作文档正文；正文变化不会进入 Workspace 索引或文件树。
+#[tauri::command]
+async fn write_agent_work(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: agent_work::WriteAgentWorkInput,
+) -> Result<agent_work::AgentWorkDocument, String> {
+    let root = workspace_root(&state)?;
+    agent_work::write_at(&app, &root, input)
+}
+
 /// 读取当前文档的批注（侧车不存在时返回空正文）。
 #[tauri::command]
 async fn read_annotation(
+    app: AppHandle,
     state: State<'_, AppState>,
-    doc_path: String,
+    target: AnnotationTarget,
 ) -> Result<annotate::AnnotationData, String> {
-    let root = workspace_root(&state)?;
-    let doc = ensure_existing_path_inside_workspace(&doc_path, &state)?;
-    let rel = doc.strip_prefix(&root).unwrap_or(&doc);
-    if !annotate::is_annotation_target(rel) {
-        return Err("批注文件与批注汇总本身不能再写批注".into());
+    match target {
+        AnnotationTarget::Workspace { path } => {
+            let root = workspace_root(&state)?;
+            let doc = ensure_existing_path_inside_workspace(&path, &state)?;
+            let rel = doc.strip_prefix(&root).unwrap_or(&doc);
+            if !annotate::is_annotation_target(rel) {
+                return Err("批注文件与批注汇总本身不能再写批注".into());
+            }
+            annotate::read_annotation_data(&root, &doc)
+        }
+        AnnotationTarget::Library {
+            source_id,
+            relative_path,
+            content_hash,
+        } => {
+            let document =
+                library_annotation_document(&app, &source_id, &relative_path, &content_hash)?;
+            let root = library_annotation_root(&app)?;
+            annotate::read_library_annotation_data(
+                &root,
+                &source_id,
+                &content_hash,
+                &document.uri,
+                &document.title,
+                &document.relative_path,
+            )
+        }
+        AnnotationTarget::Agent { id } => {
+            let workspace = workspace_root(&state)?;
+            let document = agent_work::read_at(&app, &workspace, &id)?;
+            let root = agent_work::annotation_root(&app, &workspace)?;
+            annotate::read_agent_annotation_data(&root, &id, &document.uri, &document.title)
+        }
     }
-    annotate::read_annotation_data(&root, &doc)
 }
 
 /// 保存当前文档的批注（正文为空则删除侧车 = 撤销批注）。
@@ -486,19 +663,48 @@ async fn read_annotation(
 async fn save_annotation(
     app: AppHandle,
     state: State<'_, AppState>,
-    doc_path: String,
+    target: AnnotationTarget,
     body: String,
 ) -> Result<(), String> {
-    let root = workspace_root(&state)?;
-    let doc = ensure_existing_path_inside_workspace(&doc_path, &state)?;
-    let rel = doc.strip_prefix(&root).unwrap_or(&doc);
-    if !annotate::is_annotation_target(rel) {
-        return Err("批注文件与批注汇总本身不能再写批注".into());
-    }
-    let sidecar = annotate::save_annotation(&root, &doc, &body)?;
-    // 批注文件也进全文索引（删除时清理即可，索引重建会吸收）
-    if sidecar.exists() {
-        let _ = with_index(&app, &state, |conn, root| indexer::index_single(conn, root, &sidecar));
+    match target {
+        AnnotationTarget::Workspace { path } => {
+            let root = workspace_root(&state)?;
+            let doc = ensure_existing_path_inside_workspace(&path, &state)?;
+            let rel = doc.strip_prefix(&root).unwrap_or(&doc);
+            if !annotate::is_annotation_target(rel) {
+                return Err("批注文件与批注汇总本身不能再写批注".into());
+            }
+            let sidecar = annotate::save_annotation(&root, &doc, &body)?;
+            // 批注文件也进全文索引（删除时清理即可，索引重建会吸收）
+            if sidecar.exists() {
+                let _ = with_index(&app, &state, |conn, root| {
+                    indexer::index_single(conn, root, &sidecar)
+                });
+            }
+        }
+        AnnotationTarget::Library {
+            source_id,
+            relative_path,
+            content_hash,
+        } => {
+            let document =
+                library_annotation_document(&app, &source_id, &relative_path, &content_hash)?;
+            let root = library_annotation_root(&app)?;
+            annotate::save_library_annotation(
+                &root,
+                &source_id,
+                &content_hash,
+                &document.title,
+                &document.relative_path,
+                &body,
+            )?;
+        }
+        AnnotationTarget::Agent { id } => {
+            let workspace = workspace_root(&state)?;
+            let document = agent_work::read_at(&app, &workspace, &id)?;
+            let root = agent_work::annotation_root(&app, &workspace)?;
+            annotate::save_agent_annotation(&root, &id, &document.title, &document.uri, &body)?;
+        }
     }
     Ok(())
 }
@@ -568,6 +774,14 @@ pub fn run() {
             create_markdown,
             rebuild_index,
             search_index,
+            add_library_source,
+            refresh_library,
+            search_library,
+            read_library_document,
+            list_agent_works,
+            read_agent_work,
+            create_agent_work,
+            write_agent_work,
             read_annotation,
             save_annotation,
             aggregate_annotations,

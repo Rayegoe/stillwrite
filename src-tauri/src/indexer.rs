@@ -33,14 +33,14 @@ pub fn open_index(db_path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-fn is_markdown(path: &Path) -> bool {
+pub(crate) fn is_markdown(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
         .unwrap_or(false)
 }
 
-fn title_of(name: &str) -> String {
+pub(crate) fn title_of(name: &str) -> String {
     let stem = name
         .rsplit_once('.')
         .map(|(stem, _)| stem)
@@ -48,7 +48,7 @@ fn title_of(name: &str) -> String {
     stem.to_string()
 }
 
-fn word_count(text: &str) -> usize {
+pub(crate) fn word_count(text: &str) -> usize {
     // 简单统计：拉丁词 + CJK 字符块
     let mut words = 0usize;
     let mut in_latin = false;
@@ -71,7 +71,7 @@ fn word_count(text: &str) -> usize {
     words
 }
 
-fn snippet_of(text: &str) -> String {
+pub(crate) fn snippet_of(text: &str) -> String {
     let text = text.trim();
     let mut out = String::new();
     let mut count = 0;
@@ -89,7 +89,7 @@ fn snippet_of(text: &str) -> String {
 }
 
 /// 遍历工作区里的 markdown 文件，返回 (path, mtime_secs, size)。
-fn walk(root: &Path) -> Vec<(PathBuf, i64, u64)> {
+pub(crate) fn walk(root: &Path) -> Vec<(PathBuf, i64, u64)> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {

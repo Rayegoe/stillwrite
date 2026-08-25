@@ -346,10 +346,30 @@ pub fn read_annotation_data(root: &Path, doc_path: &Path) -> Result<AnnotationDa
     let rel_str = rel_of(root, doc_path);
     let rel = Path::new(&rel_str);
     let sidecar = root.join(annotation_rel(rel));
+    read_annotation_sidecar(
+        root,
+        &sidecar,
+        &doc_path.to_string_lossy(),
+        &title_of(doc_path),
+        &rel_str,
+    )
+}
+
+/// 读取任意受调用方约束的批注侧车。
+///
+/// Workspace 与 Library 使用同一份批注格式和解析逻辑，但侧车根目录不同：
+/// Workspace 侧车在工作区 `批注/`，Library 侧车在应用数据目录，避免修改外部资料。
+fn read_annotation_sidecar(
+    root: &Path,
+    sidecar: &Path,
+    doc_path: &str,
+    title: &str,
+    note_rel: &str,
+) -> Result<AnnotationData, String> {
     if !sidecar.is_file() {
         return Ok(AnnotationData {
-            doc_path: doc_path.to_string_lossy().to_string(),
-            title: title_of(doc_path),
+            doc_path: doc_path.to_string(),
+            title: title.to_string(),
             updated_at: String::new(),
             body: String::new(),
         });
@@ -361,15 +381,15 @@ pub fn read_annotation_data(root: &Path, doc_path: &Path) -> Result<AnnotationDa
         if let Some(parent) = sidecar.parent() {
             let _ = crate::create_dir_all_inside(root, parent);
         }
-        let upgraded = render_note(&title_of(doc_path), &rel_str, &body, &updated_at);
+        let upgraded = render_note(title, note_rel, &body, &updated_at);
         let _ = crate::atomic_write(&sidecar, &upgraded);
         (updated_at, body)
     } else {
         parse_note(&content)
     };
     Ok(AnnotationData {
-        doc_path: doc_path.to_string_lossy().to_string(),
-        title: title_of(doc_path),
+        doc_path: doc_path.to_string(),
+        title: title.to_string(),
         updated_at,
         body,
     })
@@ -382,11 +402,28 @@ pub fn save_annotation(root: &Path, doc_path: &Path, body: &str) -> Result<PathB
     let rel = Path::new(&rel_str);
     let sidecar = root.join(annotation_rel(rel));
 
+    save_annotation_sidecar(
+        root,
+        &sidecar,
+        &title_of(doc_path),
+        &rel_str,
+        body,
+    )
+}
+
+fn save_annotation_sidecar(
+    root: &Path,
+    sidecar: &Path,
+    title: &str,
+    note_rel: &str,
+    body: &str,
+) -> Result<PathBuf, String> {
+
     if body.trim().is_empty() {
         if sidecar.is_file() {
             fs::remove_file(&sidecar).map_err(|e| format!("删除批注失败: {e}"))?;
         }
-        return Ok(sidecar);
+        return Ok(sidecar.to_path_buf());
     }
 
     if let Some(parent) = sidecar.parent() {
@@ -398,9 +435,82 @@ pub fn save_annotation(root: &Path, doc_path: &Path, body: &str) -> Result<PathB
             .map(|d| d.as_secs())
             .unwrap_or(0),
     );
-    let content = render_note(&title_of(doc_path), &rel_of(root, doc_path), body, &updated_at);
+    let content = render_note(title, note_rel, body, &updated_at);
     crate::atomic_write(&sidecar, &content)?;
-    Ok(sidecar)
+    Ok(sidecar.to_path_buf())
+}
+
+fn safe_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+/// Library 批注的侧车使用 `source_id/content_hash.md` 作为稳定键。
+/// 内容变化后会得到新的键，避免批注静默附着到另一版资料。
+pub fn read_library_annotation_data(
+    root: &Path,
+    source_id: &str,
+    content_hash: &str,
+    uri: &str,
+    title: &str,
+    relative_path: &str,
+) -> Result<AnnotationData, String> {
+    if !safe_component(source_id) || !safe_component(content_hash) {
+        return Err("资料批注标识无效".into());
+    }
+    let sidecar = root
+        .join(source_id)
+        .join(format!("{content_hash}.md"));
+    let note_rel = format!("{source_id}/{relative_path}");
+    read_annotation_sidecar(root, &sidecar, uri, title, &note_rel)
+}
+
+pub fn save_library_annotation(
+    root: &Path,
+    source_id: &str,
+    content_hash: &str,
+    title: &str,
+    relative_path: &str,
+    body: &str,
+) -> Result<PathBuf, String> {
+    if !safe_component(source_id) || !safe_component(content_hash) {
+        return Err("资料批注标识无效".into());
+    }
+    let sidecar = root
+        .join(source_id)
+        .join(format!("{content_hash}.md"));
+    let note_rel = format!("{source_id}/{relative_path}");
+    save_annotation_sidecar(root, &sidecar, title, &note_rel, body)
+}
+
+/// Agent Work 的批注使用工作 ID 作为稳定键，正文和批注都保存在应用数据目录。
+pub fn read_agent_annotation_data(
+    root: &Path,
+    id: &str,
+    uri: &str,
+    title: &str,
+) -> Result<AnnotationData, String> {
+    if !safe_component(id) {
+        return Err("Agent 工作标识无效".into());
+    }
+    let sidecar = root.join(format!("{id}.md"));
+    read_annotation_sidecar(root, &sidecar, uri, title, uri)
+}
+
+pub fn save_agent_annotation(
+    root: &Path,
+    id: &str,
+    title: &str,
+    uri: &str,
+    body: &str,
+) -> Result<PathBuf, String> {
+    if !safe_component(id) {
+        return Err("Agent 工作标识无效".into());
+    }
+    let sidecar = root.join(format!("{id}.md"));
+    save_annotation_sidecar(root, &sidecar, title, uri, body)
 }
 
 /// 汇总所有批注到工作区根目录 `批注汇总.md`，返回结果与汇总文件路径。
@@ -518,6 +628,33 @@ mod tests {
         assert!(!sidecar.exists(), "空正文应删除侧车");
         let data = read_annotation_data(&root, &doc).unwrap();
         assert_eq!(data.body, "");
+    }
+
+    #[test]
+    fn library_annotation_roundtrip_uses_content_identity() {
+        let root = tmp_root("library-roundtrip");
+        let sidecar = save_library_annotation(
+            &root,
+            "source123",
+            "abc123",
+            "资料标题",
+            "2026-08-25/entry.md",
+            "资料批注",
+        )
+        .unwrap();
+        assert_eq!(sidecar, root.join("source123/abc123.md"));
+        let data = read_library_annotation_data(
+            &root,
+            "source123",
+            "abc123",
+            "library://source123/2026-08-25/entry.md",
+            "资料标题",
+            "2026-08-25/entry.md",
+        )
+        .unwrap();
+        assert_eq!(data.doc_path, "library://source123/2026-08-25/entry.md");
+        assert_eq!(data.title, "资料标题");
+        assert_eq!(data.body, "资料批注");
     }
 
     #[test]
