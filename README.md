@@ -48,22 +48,49 @@ ssh user@example.invalid "git --version"
 
 ## v0.3 原型：批注 + 自动汇总（本分支新增）
 
-工作区里**任意 Markdown 文档**都可以写批注（不区分来源、不按章节拆分），一键汇总成总笔记：
+工作区里**任意 Markdown 文档**都可以按字句或段落写批注，并一键汇总成总笔记：
 
-- 工具栏 `批注` 打开右侧批注栏，当前文档整篇一篇批注（支持 Markdown），650ms 防抖自动保存。
+- 在写作区选中字句后点 `＋ 批注`；没有选区时，右栏 `新批注` 会取光标所在段落。阅读区选中文字也会出现轻量 `＋ 批注` 按钮。
+- 阅读区用高亮和编号标出原文，点击编号展开右侧批注栏并定位对应卡片；点卡片里的原文可回到正文位置。
+- 每篇文档可有多条批注，右栏仅显示类型、原文、时间和批注正文；正文编辑仍采用 650ms 防抖自动保存。
+- 汇总时保留每条批注自己的更新时间，不再把同一文档内的批注统一成侧车文件最后保存时间。
+- 汇总中的来源路径可点击回到原 Markdown；正文中的普通 URL、项目内路径、完整文件名，以及唯一对应某个 Markdown 文件的名称会自动变成链接。
 - 批注存放在工作区 `批注/` 文件夹，**按原文路径镜像**（`docs/ch01.md` → `批注/docs/ch01.md`），随 git 同步、可全文搜索、可手工打开编辑。
-- 每篇批注文件只标注**来源**（`> 来源：`原文件相对路径）与**时间**（`> 时间：`最近保存时刻）：
+- 侧车仍是普通 Markdown：文件头标注**来源**与**最近保存时间**，每条批注保留可读的原文引用和正文；结构锚点用 Markdown 注释保存。
+- 已有的旧版整篇自由文本批注会无损显示为一条“全文批注”，首次编辑后自动升级格式。
 
   ```markdown
   # 批注：ch01-llm-wiki-是什么
   > 来源：`ch01-llm-wiki-是什么.md`
   > 时间：2026-08-10 17:20
 
-  读完后记：wiki 把知识编译一次，比 RAG 每次现查更省。
+  <!-- stillwrite-annotation:… -->
+  > 原文（字句）：
+  > wiki 把知识编译一次
+
+  这个说法比“每次现查”更准确，可以保留。
+  <!-- /stillwrite-annotation -->
   ```
 
 - `汇总批注` 一键把全部批注合并到工作区根目录 `批注汇总.md`（按相对路径顺序、只纳非空、自动生成可重复覆盖；文件菜单里也有入口）。
 - 批注清空即删除侧车文件（撤销批注）；批注文件与汇总文件自身不能再批注；删除 `批注/` 文件夹即可整体撤销功能。
+
+### 常住 Agent 工作台
+
+工具栏里的 `Agent` 是常驻入口，不依赖临时实验面板。它通过本地
+`zuaef-agent` 的 `stillwrite` surface 发起一次自然语言 turn，返回文本、会话/运行
+标识和 receipt；停止按钮只停止当前本地进程，不宣称撤销已经发生的外部效果。
+
+启动器按以下顺序发现：
+
+1. `STILLWRITE_ZUAEF_EXECUTABLE`：明确的可执行文件路径；
+2. `PATH` 中的 `zuaef-agent`；
+3. `STILLWRITE_ZUAEF_PROJECT_ROOT` 配合 `uv run --project … zuaef-agent`。
+
+若 Agent 使用独立配置目录，可再设置 `STILLWRITE_ZUAEF_CONFIG_ROOT`。被调用的
+CLI 需要提供 `profile check ace-writing` 和
+`gateway turn --surface stillwrite --profile ace-writing`，请求/响应使用单行 JSON
+并校验 workspace、tenant、user、thread 的 routing identity。
 
 ## 为什么不是单 HTML `file://`
 
@@ -79,6 +106,7 @@ ssh user@example.invalid "git --version"
 | Ctrl/Cmd + S | 立即保存 |
 | Ctrl/Cmd + R | 刷新目录 |
 | Ctrl/Cmd + B | 显示/隐藏文件栏 |
+| Ctrl/Cmd + Shift + M | 新建字句/段落批注 |
 | Ctrl/Cmd + 1 | 仅写作 |
 | Ctrl/Cmd + 2 | 双栏 |
 | Ctrl/Cmd + 3 | 仅阅读 |
@@ -156,11 +184,16 @@ cargo clean
 stillwrite/
 ├── ui/
 │   ├── index.html      # 静态界面（含搜索框、同步按钮、批注栏）
+│   ├── annotations.js  # 结构化批注编解码、选区/段落捕获与锚点恢复
+│   ├── annotations.test.js # 批注格式与锚点单元测试
+│   ├── document-links.js # URL 与项目内 Markdown 名称/路径识别和跳转
+│   ├── document-links.test.js # 内外链接识别与相对路径解析测试
 │   ├── app.js          # 文件树、搜索、同步、自动保存、Markdown 预览、布局、批注
 │   └── style.css       # 沉浸式双栏视觉 + 批注栏
 └── src-tauri/
-    ├── src/lib.rs      # 文件夹/文档选择 + 工作区边界 + 文件读写 + 12 个 command
+    ├── src/lib.rs      # 文件夹/文档选择 + 工作区边界 + 文件读写 + Tauri command 注册
     ├── src/annotate.rs # 批注侧车：读写 `批注/`（标注来源/时间）+ 汇总 `批注汇总.md`
+    ├── src/agent.rs    # 常驻 Agent：本地 launcher、stillwrite surface、取消与 receipt 校验
     ├── src/indexer.rs  # SQLite FTS5 侧车索引（rusqlite bundled）
     ├── src/sync.rs     # git 同步引擎（最后写入者胜 + 单测 + 板子集成测试）
     ├── capabilities/   # 最小 IPC 权限
@@ -170,8 +203,10 @@ stillwrite/
 ### 测试
 
 ```bash
+node ui/annotations.test.js # 结构化批注前端单元测试
+node ui/document-links.test.js # 项目内文档链接与 URL 单元测试
 cd src-tauri
-cargo test                # 21 个默认测试；另有 2 个按需调试/网络测试
+cargo test                # 默认单测与批注流程测试；另有 2 个按需调试/网络测试
 cargo test -- --ignored live   # 需要配置的远程设备在线：真实跨设备推送/拉取/冲突收敛
 ```
 

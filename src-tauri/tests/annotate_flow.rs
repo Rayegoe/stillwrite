@@ -57,10 +57,10 @@ fn full_annotation_flow_any_doc() {
 
     let aggregate_md = fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap();
     assert!(aggregate_md.contains("## ch01-llm-wiki-是什么"));
-    assert!(aggregate_md.contains("来源：`ch01-llm-wiki-是什么.md`"));
+    assert!(aggregate_md.contains("来源：[ch01-llm-wiki-是什么.md](<ch01-llm-wiki-是什么.md>)"));
     assert!(aggregate_md.contains("批注于 "));
     assert!(aggregate_md.contains("## 随手记"));
-    assert!(aggregate_md.contains("来源：`笔记/随手记.md`"));
+    assert!(aggregate_md.contains("来源：[笔记/随手记.md](<笔记/随手记.md>)"));
 
     // 6. 幂等：汇总文件自身不被当作源文档
     let again = annotate::aggregate(&root).unwrap();

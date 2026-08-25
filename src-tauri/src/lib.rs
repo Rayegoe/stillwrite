@@ -10,6 +10,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 pub mod annotate;
+mod agent;
 mod indexer;
 mod sync;
 
@@ -542,6 +543,7 @@ async fn sync_workspace(
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .manage(agent::AgentProcessState::default())
         .setup(|app| {
             let lock_path = app.path().app_data_dir()?.join("stillwrite.lock");
             match try_acquire_instance_lock(&lock_path)? {
@@ -569,7 +571,10 @@ pub fn run() {
             read_annotation,
             save_annotation,
             aggregate_annotations,
-            sync_workspace
+            sync_workspace,
+            agent::agent_probe,
+            agent::agent_turn,
+            agent::agent_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running Stillwrite");

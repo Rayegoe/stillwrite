@@ -65,11 +65,18 @@
           <span class="sync-state" id="syncState" hidden></span>
           <span class="save-state" id="saveState">就绪</span>
           <button
+            class="text-btn agent-btn"
+            id="agentButton"
+            title="打开 Agent 工作台"
+          >
+            Agent
+          </button>
+          <button
             class="text-btn annotate-btn"
             id="annotationButton"
-            title="批注（按文档写笔记，汇总到 批注汇总.md）"
+            title="为选中的字句添加批注 (Ctrl+Shift+M)"
           >
-            批注
+            ＋ 批注
           </button>
           <div class="segmented" aria-label="视图模式">
             <button data-view="editor" title="仅写作 (Ctrl+1)">写</button>
@@ -144,14 +151,16 @@
         ></div>
         <section class="annotate-panel" id="annotatePanel" hidden>
           <div class="annotate-head">
-            <span class="annotate-title">批注</span>
+            <span class="annotate-title">
+              批注 <span class="annotate-count" id="annotateCount">0</span>
+            </span>
             <div class="annotate-actions">
               <button
                 class="text-btn"
-                id="aggregateButton"
-                title="汇总所有单章批注到工作区根目录 批注汇总.md"
+                id="newAnnotation"
+                title="批注当前选中的字句；未选择时批注光标所在段落"
               >
-                汇总批注
+                新批注
               </button>
               <button
                 class="icon-btn subtle"
@@ -166,23 +175,67 @@
             <div class="annotate-doc-name" id="annotateDocName">未打开文档</div>
             <div class="annotate-doc-path" id="annotateDocPath"></div>
           </div>
-          <div class="annotate-note">
-            <div class="annotate-section-label">
-              批注
+          <div class="annotate-stream" id="annotateStream">
+            <div class="annotate-stream-meta">
+              <span id="annotateHint">选择字句或把光标放在段落中，再点“新批注”</span>
               <span class="annotate-save-state" id="annotateSaveState"></span>
             </div>
-            <textarea
-              id="annotateEditor"
-              spellcheck="true"
-              autocomplete="off"
-              placeholder="对这篇文档写点什么…（支持 Markdown）"
-            ></textarea>
+            <div class="annotate-composer" id="annotateComposer" hidden>
+              <div class="annotation-quote" id="annotationDraftQuote"></div>
+              <textarea
+                id="annotationDraft"
+                rows="4"
+                spellcheck="true"
+                autocomplete="off"
+                placeholder="写下你的批注…"
+              ></textarea>
+              <div class="annotation-compose-actions">
+                <button class="text-btn" id="cancelAnnotation" type="button">取消</button>
+                <button class="primary-btn" id="addAnnotation" type="button">添加批注</button>
+              </div>
+            </div>
+            <div class="annotation-empty" id="annotationEmpty">
+              <span class="annotation-empty-mark">“</span>
+              <strong>还没有批注</strong>
+              <span>可按字句，也可按整段留下想法。</span>
+            </div>
+            <div class="annotation-list" id="annotationList" role="list"></div>
           </div>
-          <div class="annotate-foot" id="annotateFoot">
-            批注保存在工作区「批注/」文件夹，随文档一起 git 同步。
+          <div class="annotate-foot">
+            <span id="annotateFoot">批注保存在「批注/」，随文档同步。</span>
+            <button class="annotate-foot-action" id="aggregateButton" type="button">
+              汇总全部
+            </button>
           </div>
         </section>
       </main>
+
+      <section class="agent-probe" id="agentPanel" hidden aria-label="Agent 工作台">
+        <div class="agent-probe-head">
+          <div>
+            <strong>Agent 工作台</strong>
+            <span id="agentState">尚未连接</span>
+          </div>
+          <button class="icon-btn subtle" id="closeAgent" title="关闭 Agent 工作台">×</button>
+        </div>
+        <div class="agent-transcript" id="agentTranscript" aria-live="polite">
+          <p class="agent-empty">输入自然语言指令，结果经本地 Gateway 与 Runtime 返回。</p>
+        </div>
+        <div class="agent-evidence" id="agentEvidence" hidden></div>
+        <div class="agent-composer">
+          <textarea
+            id="agentPrompt"
+            rows="3"
+            placeholder="给 Agent 一条自然语言指令…"
+            aria-label="Agent 指令"
+          ></textarea>
+          <div class="agent-actions">
+            <span>Ctrl+Enter 发送</span>
+            <button class="text-btn" id="agentCancel" disabled>停止等待</button>
+            <button class="primary-btn" id="agentSend">发送</button>
+          </div>
+        </div>
+      </section>
     </div>
 
     <dialog id="newFileDialog" class="modal">
@@ -200,6 +253,12 @@
       </form>
     </dialog>
 
+    <button class="selection-annotate" id="selectionAnnotate" type="button" hidden>
+      ＋ 批注
+    </button>
+
+    <script src="./annotations.js"></script>
+    <script src="./document-links.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

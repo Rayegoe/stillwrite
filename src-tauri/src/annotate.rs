@@ -15,12 +15,17 @@
 //!
 //! 汇总文件：工作区根目录 `批注汇总.md`，由「汇总批注」一键生成，手工修改会在下次汇总被覆盖。
 
-use serde::Serialize;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const ANNOTATE_DIR: &str = "批注";
 pub const AGGREGATE_NAME: &str = "批注汇总.md";
+const STRUCTURED_HEADER: &str = "<!-- stillwrite-annotations:v1 -->";
+const ITEM_PREFIX: &str = "<!-- stillwrite-annotation:";
+const ITEM_PREFIX_END: &str = " -->";
+const QUOTE_END: &str = "<!-- /stillwrite-quote -->";
 
 #[derive(Serialize)]
 pub struct AnnotationData {
@@ -143,6 +148,73 @@ pub struct AggregateEntry {
     pub body: String,
 }
 
+#[derive(Deserialize)]
+struct StructuredAnnotationMeta {
+    #[serde(rename = "updatedAt", default)]
+    updated_at: String,
+    #[serde(rename = "createdAt", default)]
+    created_at: String,
+}
+
+/// 结构化批注把每条时间保存在 item 元数据里。汇总时将它还原成可读 Markdown，
+/// 避免所有批注都错误地显示为侧车文件最后一次保存的时间。
+fn aggregate_body_with_item_times(body: &str) -> (String, bool) {
+    if !body.contains(STRUCTURED_HEADER) {
+        return (body.to_string(), false);
+    }
+
+    let mut out = String::new();
+    let mut pending_time = None;
+    let mut found_item_time = false;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(encoded) = trimmed
+            .strip_prefix(ITEM_PREFIX)
+            .and_then(|value| value.strip_suffix(ITEM_PREFIX_END))
+        {
+            pending_time = URL_SAFE_NO_PAD
+                .decode(encoded)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<StructuredAnnotationMeta>(&bytes).ok())
+                .map(|meta| {
+                    if meta.updated_at.is_empty() {
+                        meta.created_at
+                    } else {
+                        meta.updated_at
+                    }
+                })
+                .filter(|time| !time.is_empty());
+        }
+
+        // 汇总里引用块本身已经表达“原文”，无需重复显示类型说明。
+        if trimmed.starts_with("> 原文（") && trimmed.ends_with("）：") {
+            continue;
+        }
+
+        out.push_str(line);
+        out.push('\n');
+        if trimmed == QUOTE_END {
+            if let Some(time) = pending_time.take() {
+                out.push_str("\n> 批注时间：");
+                out.push_str(&time);
+                out.push_str("\n");
+                found_item_time = true;
+            }
+        }
+    }
+    (out.trim().to_string(), found_item_time)
+}
+
+fn push_source_link(out: &mut String, source_rel: &str) {
+    let label = source_rel.replace('\\', "\\\\").replace(']', "\\]");
+    let href = source_rel.replace('>', "%3E");
+    out.push('[');
+    out.push_str(&label);
+    out.push_str("](<");
+    out.push_str(&href);
+    out.push_str(">)");
+}
+
 /// 把汇总条目渲染成 `批注汇总.md` 的内容。
 pub fn render_aggregate(ws_name: &str, entries: &[AggregateEntry]) -> String {
     let mut out = String::from("# 《");
@@ -156,16 +228,15 @@ pub fn render_aggregate(ws_name: &str, entries: &[AggregateEntry]) -> String {
         }
         out.push_str("## ");
         out.push_str(&entry.title);
-        out.push_str("\n\n> 来源：`");
-        out.push_str(&entry.source_rel);
-        if !entry.updated_at.is_empty() {
-            out.push_str("` · 批注于 ");
+        out.push_str("\n\n> 来源：");
+        push_source_link(&mut out, &entry.source_rel);
+        let (aggregate_body, has_item_times) = aggregate_body_with_item_times(&entry.body);
+        if !has_item_times && !entry.updated_at.is_empty() {
+            out.push_str(" · 批注于 ");
             out.push_str(&entry.updated_at);
-        } else {
-            out.push('`');
         }
         out.push_str("\n\n");
-        out.push_str(&entry.body);
+        out.push_str(&aggregate_body);
         out.push_str("\n\n");
     }
     if entries.is_empty() {
@@ -466,9 +537,41 @@ mod tests {
         let idx02 = md.find("ch02").unwrap();
         let idx10 = md.find("ch10").unwrap();
         assert!(idx02 < idx10, "应保持相对路径字典序");
-        assert!(md.contains("来源：`ch02.md`"));
+        assert!(md.contains("来源：[ch02.md](<ch02.md>)"));
         assert!(md.contains("中段的思考"));
         assert!(md.contains("批注于 "));
+    }
+
+    #[test]
+    fn aggregate_structured_annotations_use_each_item_time() {
+        let meta_one = URL_SAFE_NO_PAD.encode(
+            r#"{"id":"one","createdAt":"2026-08-25 09:10","updatedAt":"2026-08-25 09:12"}"#,
+        );
+        let meta_two = URL_SAFE_NO_PAD.encode(
+            r#"{"id":"two","createdAt":"2026-08-25 10:20","updatedAt":"2026-08-25 10:25"}"#,
+        );
+        let body = format!(
+            "{STRUCTURED_HEADER}\n\n{ITEM_PREFIX}{meta_one}{ITEM_PREFIX_END}\n<!-- stillwrite-quote -->\n> 原文（字句）：\n> 第一处原文\n{QUOTE_END}\n\n第一条批注\n<!-- /stillwrite-annotation -->\n\n{ITEM_PREFIX}{meta_two}{ITEM_PREFIX_END}\n<!-- stillwrite-quote -->\n> 原文（段落）：\n> 第二处原文\n{QUOTE_END}\n\n第二条批注\n<!-- /stillwrite-annotation -->"
+        );
+        let md = render_aggregate(
+            "测试工作区",
+            &[AggregateEntry {
+                title: "测试文档".into(),
+                source_rel: "测试文档.md".into(),
+                updated_at: "2026-08-25 11:59".into(),
+                body,
+            }],
+        );
+
+        assert!(md.contains("> 批注时间：2026-08-25 09:12"), "{md}");
+        assert!(md.contains("> 批注时间：2026-08-25 10:25"), "{md}");
+        assert!(!md.contains("原文（字句）"), "{md}");
+        assert!(!md.contains("原文（段落）"), "{md}");
+        assert!(md.contains("来源：[测试文档.md](<测试文档.md>)"), "{md}");
+        assert!(
+            !md.contains("批注于 2026-08-25 11:59"),
+            "结构化批注不应再使用侧车的最后保存时间: {md}"
+        );
     }
 
     #[test]
@@ -507,7 +610,7 @@ mod tests {
         let md = fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap();
         assert!(md.contains("## 随手记"));
         assert!(md.contains("## idea"));
-        assert!(md.contains("来源：`notes/idea.md`"));
+        assert!(md.contains("来源：[notes/idea.md](<notes/idea.md>)"));
     }
 
     #[test]
