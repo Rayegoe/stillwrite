@@ -52,8 +52,11 @@ struct OpenDocumentData {
 enum AnnotationTarget {
     Workspace { path: String },
     Library {
+        #[serde(rename = "sourceId", alias = "source_id")]
         source_id: String,
+        #[serde(rename = "relativePath", alias = "relative_path")]
         relative_path: String,
+        #[serde(rename = "contentHash", alias = "content_hash")]
         content_hash: String,
     },
     Agent { id: String },
