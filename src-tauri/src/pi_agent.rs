@@ -643,6 +643,40 @@ fn executable_on_path(name: &str, path_value: Option<&OsString>) -> Option<PathB
     })
 }
 
+fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+fn executable_in_user_install(home: Option<&Path>) -> Option<PathBuf> {
+    let home = home?;
+    let mut candidates = vec![home.join(".local").join("bin").join("pi")];
+    let pi_node_root = home.join(".local").join("share").join("pi-node");
+    if let Ok(entries) = fs::read_dir(pi_node_root) {
+        let mut versioned = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(|file_type| file_type.is_dir())
+                    .map(|_| entry.path().join("bin").join("pi"))
+            })
+            .collect::<Vec<_>>();
+        versioned.sort_by(|left, right| right.cmp(left));
+        candidates.extend(versioned);
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| is_executable(candidate))
+}
+
 fn canonical_executable(path: PathBuf, label: &str) -> Result<PathBuf, String> {
     if !is_executable(&path) {
         return Err(format!("{label} 不存在或不可执行: {}", path.display()));
@@ -654,6 +688,14 @@ fn canonical_executable(path: PathBuf, label: &str) -> Result<PathBuf, String> {
 fn discover_launcher(
     explicit_executable: Option<PathBuf>,
     path_value: Option<OsString>,
+) -> Result<Launcher, String> {
+    discover_launcher_with_home(explicit_executable, path_value, user_home_dir().as_deref())
+}
+
+fn discover_launcher_with_home(
+    explicit_executable: Option<PathBuf>,
+    path_value: Option<OsString>,
+    home: Option<&Path>,
 ) -> Result<Launcher, String> {
     if let Some(path) = explicit_executable {
         let executable = canonical_executable(path, "STILLWRITE_PI_EXECUTABLE")?;
@@ -669,7 +711,14 @@ fn discover_launcher(
             executable,
         });
     }
-    Err("未找到 Pi：请安装 @mariozechner/pi-coding-agent 或配置 STILLWRITE_PI_EXECUTABLE".into())
+    if let Some(path) = executable_in_user_install(home) {
+        let executable = canonical_executable(path, "用户目录中的 Pi")?;
+        return Ok(Launcher {
+            label: executable.display().to_string(),
+            executable,
+        });
+    }
+    Err("未找到 Pi：请安装 Pi，或配置 STILLWRITE_PI_EXECUTABLE".into())
 }
 
 fn launcher_from_env() -> Result<Launcher, String> {
@@ -735,6 +784,8 @@ fn spawn_process(
     resources: &RuntimeResources,
     sink: EventSink,
 ) -> Result<ChildProcess, String> {
+    let system_prompt = fs::read_to_string(&resources.system_prompt)
+        .map_err(|error| format!("读取 Pi system prompt 失败: {error}"))?;
     let mut command = Command::new(&config.launcher.executable);
     command
         .current_dir(workspace)
@@ -753,7 +804,7 @@ fn spawn_process(
             OsString::from("--tools"),
             OsString::from("workspace_list,workspace_read,workspace_search"),
             OsString::from("--system-prompt"),
-            resources.system_prompt.as_os_str().to_os_string(),
+            OsString::from(system_prompt),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1288,6 +1339,7 @@ mod tests {
             system_prompt: root.join("SYSTEM.md"),
             extension: root.join("tools.ts"),
         };
+        fs::write(&resources.system_prompt, SYSTEM_PROMPT).unwrap();
         let events = Arc::new(Mutex::new(Vec::<Value>::new()));
         let events_sink = Arc::clone(&events);
         let sink: EventSink = Arc::new(move |event| events_sink.lock().unwrap().push(event));
@@ -1340,8 +1392,29 @@ mod tests {
 
     #[test]
     fn missing_pi_has_installation_guidance() {
-        let error = discover_launcher(None, Some(OsString::from(""))).unwrap_err();
+        let error = discover_launcher_with_home(None, Some(OsString::from("")), None).unwrap_err();
         assert!(error.contains("安装") || error.contains("STILLWRITE_PI_EXECUTABLE"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launcher_falls_back_to_user_pi_node_install() {
+        let root = temp_dir("user-pi-install");
+        let home = root.join("home");
+        let path_pi = home
+            .join(".local")
+            .join("share")
+            .join("pi-node")
+            .join("node-v22.23.1-linux-x64")
+            .join("bin")
+            .join("pi");
+        fs::create_dir_all(path_pi.parent().unwrap()).unwrap();
+        make_executable(&path_pi, "#!/bin/sh\n");
+        let launcher =
+            discover_launcher_with_home(None, Some(OsString::from("/no-such-path")), Some(&home))
+                .unwrap();
+        assert_eq!(launcher.executable, path_pi.canonicalize().unwrap());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1544,6 +1617,7 @@ done
             system_prompt: root.join("SYSTEM.md"),
             extension: root.join("tools.ts"),
         };
+        fs::write(&resources.system_prompt, SYSTEM_PROMPT).unwrap();
         let events = Arc::new(Mutex::new(Vec::<Value>::new()));
         let events_sink = Arc::clone(&events);
         let sink: EventSink = Arc::new(move |event| events_sink.lock().unwrap().push(event));
