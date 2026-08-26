@@ -263,6 +263,43 @@ textarea:focus-visible {
 	align-items: center;
 	gap: 3px;
 }
+.sidebar-head-actions {
+	position: relative;
+}
+.source-menu-popover {
+	position: absolute;
+	top: calc(100% + 7px);
+	right: 0;
+	z-index: 31;
+	width: 170px;
+	padding: 6px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--paper);
+	box-shadow: 0 14px 38px rgba(25, 22, 18, 0.18);
+}
+.source-menu-popover[hidden] {
+	display: none;
+}
+.source-menu-popover button {
+	width: 100%;
+	height: 32px;
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	padding: 0 9px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--ink);
+	font-size: 12px;
+	text-align: left;
+	cursor: pointer;
+}
+.source-menu-popover button:hover,
+.source-menu-popover button:focus-visible {
+	background: var(--hover);
+}
 .sidebar-tab {
 	border: 0;
 	border-radius: 6px;
@@ -426,7 +463,143 @@ textarea:focus-visible {
 	white-space: nowrap;
 }
 .library-hit-actions input {
-	 accent-color: #615a50;
+	accent-color: #615a50;
+}
+.feed-status-line {
+	margin-top: 4px;
+	font-size: 10px;
+	line-height: 1.45;
+	color: var(--muted);
+	white-space: normal;
+}
+.library-section-title {
+	padding: 10px 10px 4px;
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+.library-section-title.recent-title {
+	padding-top: 14px;
+}
+.library-source-actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.rss-section {
+	margin-top: 2px;
+}
+.rss-row {
+	cursor: pointer;
+}
+.feed-list-wrap {
+	padding-left: 10px;
+}
+.feed-list-wrap.collapsed {
+	display: none;
+}
+.feed-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 2px 0 6px;
+}
+.feed-source-row {
+	position: relative;
+	border-radius: 8px;
+	padding: 6px 8px;
+}
+.feed-source-row:hover {
+	background: var(--hover);
+}
+.feed-source-row.feed-error {
+	background: color-mix(in srgb, var(--danger, #b34f4f) 7%, transparent);
+}
+.feed-source-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+}
+.feed-source-name {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--ink);
+}
+.feed-source-status {
+	flex: 0 0 auto;
+	max-width: 46%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 9px;
+	color: var(--muted);
+}
+.feed-source-row.feed-error .feed-source-status {
+	color: var(--danger, #b34f4f);
+}
+.feed-source-url {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 9px;
+	color: var(--muted);
+}
+.feed-source-actions {
+	position: absolute;
+	right: 6px;
+	top: 22px;
+	display: none;
+	gap: 2px;
+}
+.feed-source-row:hover .feed-source-actions {
+	display: flex;
+}
+.feed-recent-list {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	padding: 0 2px 8px;
+}
+.feed-recent-card {
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	padding: 8px 10px;
+	border: 0;
+	border-radius: 8px;
+	background: var(--hover);
+	text-align: left;
+	cursor: pointer;
+}
+.feed-recent-card:hover {
+	background: var(--line);
+}
+.feed-recent-meta {
+	font-size: 9px;
+	color: var(--muted);
+}
+.feed-recent-title {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--ink);
+	line-height: 1.4;
+}
+.feed-recent-snippet {
+	font-size: 10px;
+	color: var(--muted);
+	line-height: 1.45;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
 }
 .agent-work-item {
 	position: relative;
@@ -478,6 +651,20 @@ textarea:focus-visible {
 }
 .agent-work-origin {
 	font-size: 10px;
+}
+.agent-work-preview {
+	display: -webkit-box;
+	font-size: 11px;
+	font-weight: 400;
+	line-height: 1.45;
+	color: var(--muted);
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 3;
+	overflow: hidden;
+	white-space: normal;
+}
+.agent-work-running .agent-work-meta {
+	color: #8a5d2f;
 }
 .agent-work-stop {
 	align-self: center;
@@ -1058,7 +1245,10 @@ body.resizing .resize-handle::after {
 	border-radius: 5px;
 	background: #f6f0e4;
 	color: #775f38;
-	font: 600 9px/1 ui-sans-serif, system-ui, sans-serif;
+	font:
+		600 9px / 1 ui-sans-serif,
+		system-ui,
+		sans-serif;
 	cursor: pointer;
 	vertical-align: super;
 }

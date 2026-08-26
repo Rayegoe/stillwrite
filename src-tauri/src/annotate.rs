@@ -56,9 +56,7 @@ pub fn annotation_rel(rel: &Path) -> PathBuf {
 /// 批注文件（`批注/**`）与汇总文件（`批注汇总.md`）自身不能再被批注。
 pub fn is_annotation_target(rel: &Path) -> bool {
     let rel = rel.to_string_lossy().replace('\\', "/");
-    !(rel == ANNOTATE_DIR
-        || rel.starts_with(&format!("{ANNOTATE_DIR}/"))
-        || rel == AGGREGATE_NAME)
+    !(rel == ANNOTATE_DIR || rel.starts_with(&format!("{ANNOTATE_DIR}/")) || rel == AGGREGATE_NAME)
 }
 
 /// 解析侧车内容 → (最近批注时间, 正文)。
@@ -197,7 +195,7 @@ fn aggregate_body_with_item_times(body: &str) -> (String, bool) {
             if let Some(time) = pending_time.take() {
                 out.push_str("\n> 批注时间：");
                 out.push_str(&time);
-                out.push_str("\n");
+                out.push('\n');
                 found_item_time = true;
             }
         }
@@ -219,7 +217,9 @@ fn push_source_link(out: &mut String, source_rel: &str) {
 pub fn render_aggregate(ws_name: &str, entries: &[AggregateEntry]) -> String {
     let mut out = String::from("# 《");
     out.push_str(ws_name);
-    out.push_str("》批注汇总\n\n> 此文件由「汇总批注」自动生成，手工修改会在下次汇总时被覆盖。\n\n> 共 ");
+    out.push_str(
+        "》批注汇总\n\n> 此文件由「汇总批注」自动生成，手工修改会在下次汇总时被覆盖。\n\n> 共 ",
+    );
     out.push_str(&entries.len().to_string());
     out.push_str(" 篇批注\n\n");
     for (i, entry) in entries.iter().enumerate() {
@@ -307,7 +307,9 @@ fn walk_sources(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with('.') || name == ANNOTATE_DIR || name == AGGREGATE_NAME {
@@ -374,7 +376,7 @@ fn read_annotation_sidecar(
             body: String::new(),
         });
     }
-    let content = fs::read_to_string(&sidecar).map_err(|e| format!("读取批注失败: {e}"))?;
+    let content = fs::read_to_string(sidecar).map_err(|e| format!("读取批注失败: {e}"))?;
     let (updated_at, body) = if is_old_format(&content) {
         let (updated_at, body) = migrate_old_format(&content);
         // 就地升级为新版格式，后续读写一致
@@ -382,7 +384,7 @@ fn read_annotation_sidecar(
             let _ = crate::create_dir_all_inside(root, parent);
         }
         let upgraded = render_note(title, note_rel, &body, &updated_at);
-        let _ = crate::atomic_write(&sidecar, &upgraded);
+        let _ = crate::atomic_write(sidecar, &upgraded);
         (updated_at, body)
     } else {
         parse_note(&content)
@@ -402,13 +404,7 @@ pub fn save_annotation(root: &Path, doc_path: &Path, body: &str) -> Result<PathB
     let rel = Path::new(&rel_str);
     let sidecar = root.join(annotation_rel(rel));
 
-    save_annotation_sidecar(
-        root,
-        &sidecar,
-        &title_of(doc_path),
-        &rel_str,
-        body,
-    )
+    save_annotation_sidecar(root, &sidecar, &title_of(doc_path), &rel_str, body)
 }
 
 fn save_annotation_sidecar(
@@ -418,10 +414,9 @@ fn save_annotation_sidecar(
     note_rel: &str,
     body: &str,
 ) -> Result<PathBuf, String> {
-
     if body.trim().is_empty() {
         if sidecar.is_file() {
-            fs::remove_file(&sidecar).map_err(|e| format!("删除批注失败: {e}"))?;
+            fs::remove_file(sidecar).map_err(|e| format!("删除批注失败: {e}"))?;
         }
         return Ok(sidecar.to_path_buf());
     }
@@ -436,7 +431,7 @@ fn save_annotation_sidecar(
             .unwrap_or(0),
     );
     let content = render_note(title, note_rel, body, &updated_at);
-    crate::atomic_write(&sidecar, &content)?;
+    crate::atomic_write(sidecar, &content)?;
     Ok(sidecar.to_path_buf())
 }
 
@@ -460,9 +455,7 @@ pub fn read_library_annotation_data(
     if !safe_component(source_id) || !safe_component(content_hash) {
         return Err("资料批注标识无效".into());
     }
-    let sidecar = root
-        .join(source_id)
-        .join(format!("{content_hash}.md"));
+    let sidecar = root.join(source_id).join(format!("{content_hash}.md"));
     let note_rel = format!("{source_id}/{relative_path}");
     read_annotation_sidecar(root, &sidecar, uri, title, &note_rel)
 }
@@ -478,9 +471,7 @@ pub fn save_library_annotation(
     if !safe_component(source_id) || !safe_component(content_hash) {
         return Err("资料批注标识无效".into());
     }
-    let sidecar = root
-        .join(source_id)
-        .join(format!("{content_hash}.md"));
+    let sidecar = root.join(source_id).join(format!("{content_hash}.md"));
     let note_rel = format!("{source_id}/{relative_path}");
     save_annotation_sidecar(root, &sidecar, title, &note_rel, body)
 }
@@ -569,7 +560,12 @@ mod tests {
 
     #[test]
     fn render_then_parse_roundtrip() {
-        let md = render_note("ch01", "docs/ch01.md", "批注甲\n\n第二段", "2026-08-10 12:00");
+        let md = render_note(
+            "ch01",
+            "docs/ch01.md",
+            "批注甲\n\n第二段",
+            "2026-08-10 12:00",
+        );
         let (updated_at, body) = parse_note(&md);
         assert_eq!(updated_at, "2026-08-10 12:00");
         assert_eq!(body, "批注甲\n\n第二段");
@@ -668,7 +664,10 @@ mod tests {
 
         let result = aggregate(&root).unwrap();
         assert_eq!(result.count, 2);
-        assert_eq!(result.path, root.join(AGGREGATE_NAME).to_string_lossy().to_string());
+        assert_eq!(
+            result.path,
+            root.join(AGGREGATE_NAME).to_string_lossy().to_string()
+        );
 
         let md = fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap();
         let idx02 = md.find("ch02").unwrap();
@@ -720,7 +719,11 @@ mod tests {
         // a 的批注为空 → 直接删除侧车（等效无批注）；b 写一个只有头部的侧车文件模拟脏数据
         let side = root.join("批注/b.md");
         fs::create_dir_all(side.parent().unwrap()).unwrap();
-        fs::write(&side, "# 批注：b\n\n> 来源：`b.md`\n> 时间：2026-08-10 12:00\n\n").unwrap();
+        fs::write(
+            &side,
+            "# 批注：b\n\n> 来源：`b.md`\n> 时间：2026-08-10 12:00\n\n",
+        )
+        .unwrap();
 
         let result = aggregate(&root).unwrap();
         assert_eq!(result.count, 0);
@@ -728,7 +731,10 @@ mod tests {
         // 汇总文件自身不被当作源文档（重复汇总幂等）
         let again = aggregate(&root).unwrap();
         assert_eq!(again.count, 0);
-        assert_eq!(fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap(), fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap());
+        assert_eq!(
+            fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap(),
+            fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap()
+        );
     }
 
     #[test]
@@ -785,7 +791,10 @@ mod tests {
         assert_eq!(data.updated_at, "2026-08-10 10:01");
         // 侧车已被就地升级为新版格式
         let upgraded = fs::read_to_string(&sidecar).unwrap();
-        assert!(upgraded.contains("> 来源：`AI创业思考.md`\n> 时间：2026-08-10 10:01"), "{upgraded}");
+        assert!(
+            upgraded.contains("> 来源：`AI创业思考.md`\n> 时间：2026-08-10 10:01"),
+            "{upgraded}"
+        );
         assert!(!upgraded.contains("· 更新于"));
         // 再读是幂等的
         let again = read_annotation_data(&root, &doc).unwrap();
@@ -807,7 +816,10 @@ mod tests {
         let result = aggregate(&root).unwrap();
         assert_eq!(result.count, 1);
         let md = fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap();
-        assert!(md.contains("批注于 2026-08-10 10:01"), "旧格式时间应被迁移: {md}");
+        assert!(
+            md.contains("批注于 2026-08-10 10:01"),
+            "旧格式时间应被迁移: {md}"
+        );
         assert!(md.contains("我来试一下这个章节批注的功能"));
         // 侧车已被就地升级
         assert!(!fs::read_to_string(&sidecar).unwrap().contains("· 更新于"));

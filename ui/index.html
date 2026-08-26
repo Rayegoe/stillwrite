@@ -100,21 +100,60 @@
         <aside class="sidebar" id="sidebar">
           <div class="sidebar-head">
             <div class="sidebar-tabs" role="tablist" aria-label="内容平面">
-              <button class="sidebar-tab active" id="workspaceTab" role="tab" aria-selected="true">
+              <button
+                class="sidebar-tab active"
+                id="workspaceTab"
+                role="tab"
+                aria-selected="true"
+              >
                 文件
               </button>
-              <button class="sidebar-tab" id="libraryTab" role="tab" aria-selected="false">
+              <button
+                class="sidebar-tab"
+                id="libraryTab"
+                role="tab"
+                aria-selected="false"
+              >
                 资料
               </button>
-              <button class="sidebar-tab" id="agentTab" role="tab" aria-selected="false">
+              <button
+                class="sidebar-tab"
+                id="agentTab"
+                role="tab"
+                aria-selected="false"
+              >
                 Agent
               </button>
             </div>
             <div class="sidebar-head-actions">
-              <button class="icon-btn subtle" id="addLibrarySource" title="添加资料源" hidden>
+              <button
+                class="icon-btn subtle"
+                id="addLibrarySource"
+                title="添加资料源"
+                hidden
+              >
                 ＋
               </button>
-              <button class="icon-btn subtle" id="newAgentWorkButton" title="新建 Agent 工作" hidden>
+              <div
+                class="source-menu-popover"
+                id="sourceMenu"
+                role="menu"
+                hidden
+              >
+                <button id="addLibrarySourceMenuItem" role="menuitem">
+                  添加资料目录
+                </button>
+                <button id="addFeedMenuItem" role="menuitem">添加 RSS</button>
+                <button id="importOpmlMenuItem" role="menuitem">
+                  导入 OPML
+                </button>
+              </div>
+              <button
+                class="icon-btn subtle"
+                id="newAgentWorkButton"
+                title="新建 Agent 工作"
+                hidden
+              >
                 ＋
               </button>
               <button class="icon-btn subtle" id="refreshTree" title="刷新目录">
@@ -132,10 +171,13 @@
           </div>
           <div class="library-meta" id="libraryMeta" hidden>
             <div id="libraryStats">尚未添加资料源</div>
+            <div id="feedStatusLine" class="feed-status-line" hidden></div>
           </div>
           <div class="workset-bar" id="worksetBar" hidden>
             <span id="worksetCount">当前引用 · 0 篇</span>
-            <button class="text-btn" id="clearWorkset" type="button">清空</button>
+            <button class="text-btn" id="clearWorkset" type="button">
+              清空
+            </button>
           </div>
           <div class="agent-meta" id="agentMeta" hidden>
             <div id="agentStats">还没有 Agent 工作</div>
@@ -187,7 +229,11 @@
         ></div>
         <section class="annotate-panel" id="annotatePanel" hidden>
           <div class="annotate-head">
-            <div class="annotate-title support-view-tabs" role="tablist" aria-label="支持视图">
+            <div
+              class="annotate-title support-view-tabs"
+              role="tablist"
+              aria-label="支持视图"
+            >
               <button
                 class="support-view-tab active"
                 id="annotationViewButton"
@@ -232,7 +278,9 @@
           </div>
           <div class="annotate-stream" id="annotateStream">
             <div class="annotate-stream-meta">
-              <span id="annotateHint">选择字句或把光标放在段落中，再点“新批注”</span>
+              <span id="annotateHint"
+                >选择字句或把光标放在段落中，再点“新批注”</span
+              >
               <span class="annotate-save-state" id="annotateSaveState"></span>
             </div>
             <div class="annotate-composer" id="annotateComposer" hidden>
@@ -245,8 +293,12 @@
                 placeholder="写下你的批注…"
               ></textarea>
               <div class="annotation-compose-actions">
-                <button class="text-btn" id="cancelAnnotation" type="button">取消</button>
-                <button class="primary-btn" id="addAnnotation" type="button">添加批注</button>
+                <button class="text-btn" id="cancelAnnotation" type="button">
+                  取消
+                </button>
+                <button class="primary-btn" id="addAnnotation" type="button">
+                  添加批注
+                </button>
               </div>
             </div>
             <div class="annotation-empty" id="annotationEmpty">
@@ -259,7 +311,11 @@
           <div class="related-stream" id="relatedStream" hidden></div>
           <div class="annotate-foot" id="annotateFooter">
             <span id="annotateFoot">批注保存在「批注/」，随文档同步。</span>
-            <button class="annotate-foot-action" id="aggregateButton" type="button">
+            <button
+              class="annotate-foot-action"
+              id="aggregateButton"
+              type="button"
+            >
               汇总全部
             </button>
           </div>
@@ -274,9 +330,36 @@
         <input id="newFileName" value="untitled.md" autocomplete="off" />
         <p class="modal-help">可包含子目录，例如 <code>notes/idea.md</code></p>
         <div class="modal-actions">
-          <button type="button" class="text-btn" id="cancelNewFile">取消</button>
+          <button type="button" class="text-btn" id="cancelNewFile">
+            取消
+          </button>
           <button type="submit" class="primary-btn" id="createFileButton">
             创建
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="addFeedDialog" class="modal">
+      <form method="dialog" id="addFeedForm">
+        <h3>添加 RSS / Atom 源</h3>
+        <label for="addFeedUrl">RSS / Atom URL</label>
+        <input
+          id="addFeedUrl"
+          type="url"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="https://example.com/feed.xml"
+        />
+        <p class="modal-help">
+          添加后立即在后台抓取并物化为本地 Markdown；抓取失败可稍后手动刷新。
+        </p>
+        <div class="modal-actions">
+          <button type="button" class="text-btn" id="cancelAddFeed">
+            取消
+          </button>
+          <button type="submit" class="primary-btn" id="addFeedButton">
+            添加
           </button>
         </div>
       </form>
@@ -302,8 +385,12 @@
           aria-label="Agent 请求"
         ></textarea>
         <div class="modal-actions">
-          <button type="button" class="text-btn" id="agentAskCancel">取消</button>
-          <button type="submit" class="primary-btn" id="agentAskSend">发送</button>
+          <button type="button" class="text-btn" id="agentAskCancel">
+            取消
+          </button>
+          <button type="submit" class="primary-btn" id="agentAskSend">
+            发送
+          </button>
         </div>
       </form>
     </dialog>
@@ -327,6 +414,8 @@
 
     <script src="./annotations.js"></script>
     <script src="./document-links.js"></script>
+    <script src="./agent-events.js"></script>
+    <script src="./feeds.js"></script>
     <script src="./app.js"></script>
     <script src="./library-annotation-links.js"></script>
   </body>

@@ -22,7 +22,7 @@ struct SourceRecord {
     root: PathBuf,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct LibrarySource {
     pub id: String,
     pub name: String,
@@ -64,6 +64,18 @@ pub struct LibraryDocument {
     pub content_hash: String,
     pub title: String,
     pub content: String,
+}
+
+/// Library 文档元数据（不读正文，供“最近 RSS”之类的列表使用）。
+#[derive(Serialize, Clone)]
+pub struct LibraryDocumentMeta {
+    pub uri: String,
+    pub source_id: String,
+    pub source_name: String,
+    pub relative_path: String,
+    pub content_hash: String,
+    pub title: String,
+    pub snippet: String,
 }
 
 struct RefreshStats {
@@ -151,10 +163,7 @@ pub fn open_index(db_path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-pub fn register_source_at(
-    db_path: &Path,
-    root: &Path,
-) -> Result<LibraryRefreshResult, String> {
+pub fn register_source_at(db_path: &Path, root: &Path) -> Result<LibraryRefreshResult, String> {
     let root = canonical_source_root(root)?;
     let mut conn = open_index(db_path).map_err(|e| format!("打开资料库索引失败: {e}"))?;
     let id = source_id(&root);
@@ -176,6 +185,37 @@ pub fn register_source_at(
 pub fn refresh_at(db_path: &Path) -> Result<LibraryRefreshResult, String> {
     let mut conn = open_index(db_path).map_err(|e| format!("打开资料库索引失败: {e}"))?;
     refresh(&mut conn)
+}
+
+/// 按 root 查找已注册的资料源（不触发扫描；用于幂等注册前的检查）。
+pub fn find_source_by_root(db_path: &Path, root: &Path) -> Result<Option<LibrarySource>, String> {
+    let root = canonical_source_root(root)?;
+    let conn = open_index(db_path).map_err(|e| format!("打开资料库索引失败: {e}"))?;
+    let source = conn
+        .query_row(
+            "SELECT s.id, s.name, s.root, COUNT(d.relative_path)
+             FROM library_sources s
+             LEFT JOIN library_documents d ON d.source_id = s.id
+             WHERE s.root = ?1
+             GROUP BY s.id, s.name, s.root
+             LIMIT 1",
+            params![root.to_string_lossy().to_string()],
+            |row| {
+                let stored_root: String = row.get(2)?;
+                Ok(LibrarySource {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    root: root.to_string_lossy().to_string(),
+                    documents: row.get::<_, i64>(3)? as usize,
+                    available: fs::canonicalize(&stored_root)
+                        .map(|current| current == Path::new(&stored_root) && current.is_dir())
+                        .unwrap_or(false),
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| format!("读取资料源失败: {e}"))?;
+    Ok(source)
 }
 
 pub fn search_at(
@@ -203,6 +243,42 @@ pub fn read_at(
 ) -> Result<LibraryDocument, String> {
     let conn = open_index(db_path).map_err(|e| format!("打开资料库索引失败: {e}"))?;
     read_document(&conn, source_id, relative_path)
+}
+
+/// 按 source 列出最近文档（只查现有 library_documents，不建 RSS 专属表）。
+/// 文件名按 `<date>__…` 物化时，`ORDER BY relative_path DESC` 即时间倒序。
+pub fn list_source_documents(
+    db_path: &Path,
+    source_id: &str,
+    limit: usize,
+) -> Result<Vec<LibraryDocumentMeta>, String> {
+    let conn = open_index(db_path).map_err(|e| format!("打开资料库索引失败: {e}"))?;
+    let limit = limit.clamp(1, 100);
+    let mut stmt = conn
+        .prepare(
+            "SELECT d.source_id, s.name, d.relative_path, d.content_hash, d.title, d.snippet
+             FROM library_documents d
+             JOIN library_sources s ON s.id = d.source_id
+             WHERE d.source_id = ?1
+             ORDER BY d.relative_path DESC
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("读取资料列表失败: {e}"))?;
+    let rows = stmt
+        .query_map(params![source_id, limit as i64], |row| {
+            Ok(LibraryDocumentMeta {
+                uri: document_uri(&row.get::<_, String>(0)?, &row.get::<_, String>(2)?),
+                source_id: row.get(0)?,
+                source_name: row.get(1)?,
+                relative_path: row.get(2)?,
+                content_hash: row.get(3)?,
+                title: row.get(4)?,
+                snippet: row.get(5)?,
+            })
+        })
+        .map_err(|e| format!("读取资料列表失败: {e}"))?;
+    rows.map(|row| row.map_err(|e| format!("读取资料列表失败: {e}")))
+        .collect()
 }
 
 pub fn canonical_source_root(root: &Path) -> Result<PathBuf, String> {
@@ -309,22 +385,18 @@ fn refresh(conn: &mut Connection) -> Result<LibraryRefreshResult, String> {
                 )
                 .optional()
                 .map_err(|e| format!("读取资料元数据失败: {e}"))?;
-            if previous
-                .as_ref()
-                .is_some_and(|(old_mtime, old_size, _)| {
-                    *old_mtime == mtime && *old_size == size as i64
-                })
-            {
+            if previous.as_ref().is_some_and(|(old_mtime, old_size, _)| {
+                *old_mtime == mtime && *old_size == size as i64
+            }) {
                 continue;
             }
 
             let text = match fs::read_to_string(&path) {
                 Ok(text) => normalize_text(&text),
                 Err(error) => {
-                    stats.warnings.push(format!(
-                        "跳过无法读取的资料：{}（{error}）",
-                        path.display()
-                    ));
+                    stats
+                        .warnings
+                        .push(format!("跳过无法读取的资料：{}（{error}）", path.display()));
                     continue;
                 }
             };
@@ -469,9 +541,7 @@ fn refresh(conn: &mut Connection) -> Result<LibraryRefreshResult, String> {
     })
 }
 
-fn snapshot(
-    conn: &Connection,
-) -> Result<(Vec<LibrarySource>, usize, usize), String> {
+fn snapshot(conn: &Connection) -> Result<(Vec<LibrarySource>, usize, usize), String> {
     let mut stmt = conn
         .prepare(
             "SELECT s.id, s.name, s.root, COUNT(d.relative_path)
@@ -503,8 +573,8 @@ fn snapshot(
             row.get::<_, i64>(0)
         })
         .map_err(|e| format!("统计资料数量失败: {e}"))? as usize;
-    let unique_documents: usize = conn
-        .query_row(
+    let unique_documents: usize =
+        conn.query_row(
             "SELECT COUNT(DISTINCT content_hash) FROM library_documents",
             [],
             |row| row.get::<_, i64>(0),
@@ -513,11 +583,7 @@ fn snapshot(
     Ok((sources, total_documents, unique_documents))
 }
 
-fn search(
-    conn: &Connection,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<LibrarySearchHit>, String> {
+fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<LibrarySearchHit>, String> {
     search_with_fts(conn, query, limit, "library_fts", false)
 }
 
@@ -713,7 +779,9 @@ fn normalize_relative_path(path: &str) -> Result<String, String> {
                 Component::ParentDir | Component::RootDir | Component::Prefix(_)
             )
         })
-        || path.components().any(|component| !matches!(component, Component::Normal(_)))
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err("资料路径包含不允许的路径片段".into());
     }
@@ -782,7 +850,11 @@ mod tests {
         assert_eq!(second.added, 0);
         assert_eq!(second.updated, 0);
 
-        fs::write(source.join("2026-08-25/002.md"), "# 新文章\n\n完全不同的内容。\n").unwrap();
+        fs::write(
+            source.join("2026-08-25/002.md"),
+            "# 新文章\n\n完全不同的内容。\n",
+        )
+        .unwrap();
         let third = refresh_at(&db).unwrap();
         assert_eq!(third.updated, 1);
         assert_eq!(third.unique_documents, 2);
@@ -810,7 +882,10 @@ mod tests {
         for query in ["上下文", "上下文工程", "模型", "Harness"] {
             let hits = search_related_at(&db, query, 10).unwrap();
             assert_eq!(hits.len(), 1, "query={query}");
-            assert!(hits[0].relative_path.ends_with("context.md"), "query={query}");
+            assert!(
+                hits[0].relative_path.ends_with("context.md"),
+                "query={query}"
+            );
         }
     }
 

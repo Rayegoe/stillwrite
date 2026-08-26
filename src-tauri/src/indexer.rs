@@ -1,7 +1,7 @@
 //! 本地 SQLite 侧车索引：文件仍是唯一内容源，这里只存派生的搜索/元数据。
 //! 索引放在应用数据目录，不进入工作区、不参与 git 同步，任何时刻可重建。
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -74,10 +74,29 @@ pub(crate) fn is_markdown(path: &Path) -> bool {
 }
 
 pub(crate) fn title_of(name: &str) -> String {
-    let stem = name
-        .rsplit_once('.')
-        .map(|(stem, _)| stem)
-        .unwrap_or(name);
+    let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
+    // RSS 物化文件名形如 `<YYYY-MM-DD>__<标题>__<短id>`：摘出中间标题段，
+    // 避免日期前缀和 id 尾缀出现在 Library 标题里。
+    if let Some((date_part, rest)) = stem.split_once("__") {
+        let date_ok = date_part.len() == 10
+            && date_part
+                .as_bytes()
+                .iter()
+                .enumerate()
+                .all(|(i, b)| match i {
+                    0..=3 | 5..=6 | 8..=9 => b.is_ascii_digit(),
+                    4 | 7 => *b == b'-',
+                    _ => false,
+                });
+        if date_ok {
+            if let Some((middle, suffix)) = rest.rsplit_once("__") {
+                let suffix_ok = suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit());
+                if suffix_ok && !middle.is_empty() {
+                    return middle.to_string();
+                }
+            }
+        }
+    }
     stem.to_string()
 }
 
@@ -126,7 +145,9 @@ pub(crate) fn walk(root: &Path) -> Vec<(PathBuf, i64, u64)> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -142,7 +163,17 @@ pub(crate) fn walk(root: &Path) -> Vec<(PathBuf, i64, u64)> {
                     stack.push(path);
                 } else if ft.is_file() && is_markdown(&path) {
                     if let Ok(meta) = entry.metadata() {
-                        out.push((path, meta.modified().map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)).unwrap_or(0), meta.len()));
+                        out.push((
+                            path,
+                            meta.modified()
+                                .map(|t| {
+                                    t.duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0)
+                                })
+                                .unwrap_or(0),
+                            meta.len(),
+                        ));
                     }
                 }
             }
@@ -157,7 +188,9 @@ pub fn build_index(conn: &mut Connection, root: &Path) -> Result<(usize, usize),
     let mut updated = 0usize;
     let mut removed = 0usize;
 
-    let tx = conn.transaction().map_err(|e| format!("索引事务失败: {e}"))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("索引事务失败: {e}"))?;
     {
         let mut upsert_file = tx
             .prepare(
@@ -207,7 +240,14 @@ pub fn build_index(conn: &mut Connection, root: &Path) -> Result<(usize, usize),
             let snippet = snippet_of(&text);
 
             upsert_file
-                .execute(params![rel, title, mtime, *size as i64, words as i64, snippet])
+                .execute(params![
+                    rel,
+                    title,
+                    mtime,
+                    *size as i64,
+                    words as i64,
+                    snippet
+                ])
                 .map_err(|e| format!("索引写入失败: {e}"))?;
             del_fts
                 .execute(params![rel])
@@ -234,7 +274,11 @@ pub fn build_index(conn: &mut Connection, root: &Path) -> Result<(usize, usize),
             .collect();
         for rel in known {
             if !files.iter().any(|(p, _, _)| {
-                p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/") == rel
+                p.strip_prefix(root)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    == rel
             }) {
                 tx.execute("DELETE FROM files WHERE path = ?1", params![rel])
                     .map_err(|e| format!("索引清理失败: {e}"))?;
@@ -278,7 +322,9 @@ pub fn index_single(conn: &mut Connection, root: &Path, path: &Path) -> Result<(
         .unwrap_or(0);
     let size = meta.len() as i64;
 
-    let tx = conn.transaction().map_err(|e| format!("索引事务失败: {e}"))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("索引事务失败: {e}"))?;
     tx.execute(
         "INSERT OR REPLACE INTO files (path, title, mtime, size, words, snippet) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![rel, title, mtime, size, words, snippet],
@@ -399,13 +445,16 @@ pub fn search_related(
             )
             .map_err(|e| format!("关联搜索准备失败: {e}"))?;
         let like_hits: Vec<SearchHit> = like_stmt
-            .query_map(params![format!("%{}%", query.trim()), limit as i64], |row| {
-                Ok(SearchHit {
-                    path: row.get(0)?,
-                    title: row.get(1)?,
-                    snippet: row.get(2)?,
-                })
-            })
+            .query_map(
+                params![format!("%{}%", query.trim()), limit as i64],
+                |row| {
+                    Ok(SearchHit {
+                        path: row.get(0)?,
+                        title: row.get(1)?,
+                        snippet: row.get(2)?,
+                    })
+                },
+            )
             .map_err(|e| format!("关联搜索失败: {e}"))?
             .filter_map(|r| r.ok())
             .collect();
@@ -456,8 +505,16 @@ mod tests {
         let db = root.join("test-index.db");
 
         std::fs::create_dir_all(root.join("notes")).unwrap();
-        std::fs::write(root.join("notes/idea.md"), "# 标题\n\n毛泽东选集 读书笔记\n\n关于农村包围城市\n").unwrap();
-        std::fs::write(root.join("essay.md"), "# Essay\n\nhello world, this is a test.\n").unwrap();
+        std::fs::write(
+            root.join("notes/idea.md"),
+            "# 标题\n\n毛泽东选集 读书笔记\n\n关于农村包围城市\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("essay.md"),
+            "# Essay\n\nhello world, this is a test.\n",
+        )
+        .unwrap();
 
         let mut conn = open_index(&db).unwrap();
         let (updated, removed) = build_index(&mut conn, &root).unwrap();

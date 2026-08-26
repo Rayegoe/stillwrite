@@ -43,7 +43,9 @@ fn snapshot_mtimes(root: &Path) -> HashMap<String, i64> {
     let mut map = HashMap::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name();
@@ -97,7 +99,11 @@ pub fn resolve_sync_remote(root: &Path, sync_url: &str) -> Result<String, String
     Ok("sync".to_string())
 }
 
-pub fn sync_workspace(root: &Path, remote_hint: &str, remote_name: &str) -> Result<SyncStatus, String> {
+pub fn sync_workspace(
+    root: &Path,
+    remote_hint: &str,
+    remote_name: &str,
+) -> Result<SyncStatus, String> {
     let mut status = SyncStatus::default();
 
     // 1. 确保是 git 仓库
@@ -141,33 +147,57 @@ pub fn sync_workspace(root: &Path, remote_hint: &str, remote_name: &str) -> Resu
     // 5. fetch
     let (okf, errf) = git(root, &["fetch", remote_name])?;
     if !okf {
-        return Err(format!("无法连接远程仓库（{remote_hint}）:\n{errf}\n\n请确认板子在线、SSH 密钥已配置。"));
+        return Err(format!(
+            "无法连接远程仓库（{remote_hint}）:\n{errf}\n\n请确认板子在线、SSH 密钥已配置。"
+        ));
     }
 
     // 6. 远端分支是否有真实提交（空 ref 不算）+ merge-base
     let (has_remote_commit, _) = git(
         root,
-        &["rev-parse", "--verify", "--quiet", &format!("{remote_name}/{branch}^{{commit}}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{remote_name}/{branch}^{{commit}}"),
+        ],
     )?;
     if has_remote_commit {
-        let base;
-        let pulled_total;
-        let (okb2, base_out) =
-            git(root, &["merge-base", "HEAD", &format!("{remote_name}/{branch}")])?;
+        let (okb2, base_out) = git(
+            root,
+            &["merge-base", "HEAD", &format!("{remote_name}/{branch}")],
+        )?;
         if !okb2 || base_out.trim().is_empty() {
             return Err("本地与远程历史不相关，请手动处理首次合并".into());
         }
-        base = base_out.trim().to_string();
+        let base = base_out.trim().to_string();
 
         // 7. merge（先统计远程带来多少文件变更）
-        let (_, remote_files) =
-            git(root, &["diff", "--name-only", &base, &format!("{remote_name}/{branch}")])?;
-        pulled_total = remote_files.lines().filter(|l| !l.trim().is_empty()).count();
+        let (_, remote_files) = git(
+            root,
+            &[
+                "diff",
+                "--name-only",
+                &base,
+                &format!("{remote_name}/{branch}"),
+            ],
+        )?;
+        let pulled_total = remote_files
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
 
         // merge 前快照工作区 mtime（git merge 会覆盖冲突文件的 mtime）
         let mtimes = snapshot_mtimes(root);
-        let (okm, _) =
-            git(root, &["merge", "--no-commit", "--no-ff", &format!("{remote_name}/{branch}")])?;
+        let (okm, _) = git(
+            root,
+            &[
+                "merge",
+                "--no-commit",
+                "--no-ff",
+                &format!("{remote_name}/{branch}"),
+            ],
+        )?;
 
         if !okm {
             // 有冲突：逐文件按 merge 前的 mtime / 远端提交时间裁决（最后写入者胜）
@@ -233,7 +263,10 @@ pub fn sync_workspace(root: &Path, remote_hint: &str, remote_name: &str) -> Resu
     status.pushed = 1;
 
     status.ok = true;
-    status.message = format!("已同步（拉取 {} · 推送 · 冲突 {}）", status.pulled, status.conflicts);
+    status.message = format!(
+        "已同步（拉取 {} · 推送 · 冲突 {}）",
+        status.pulled, status.conflicts
+    );
     Ok(status)
 }
 
@@ -267,11 +300,7 @@ mod tests {
     }
 
     pub(crate) fn fresh_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "sw-sync-{}-{}",
-            std::process::id(),
-            name
-        ));
+        let d = std::env::temp_dir().join(format!("sw-sync-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -286,11 +315,17 @@ mod tests {
     fn pull_push_roundtrip_and_lww_conflict() {
         let base = fresh_dir("base1");
         let bare = base.join("repo.git");
-        git_in(&base, &["init", "--bare", "-b", "main", bare.to_str().unwrap()]);
+        git_in(
+            &base,
+            &["init", "--bare", "-b", "main", bare.to_str().unwrap()],
+        );
 
         // A 首次推送
         let a = base.join("a");
-        git_in(&base, &["clone", bare.to_str().unwrap(), a.to_str().unwrap()]);
+        git_in(
+            &base,
+            &["clone", bare.to_str().unwrap(), a.to_str().unwrap()],
+        );
         setup_identity(&a);
         std::fs::write(a.join("hello.md"), "# Hello\n\nfrom A\n").unwrap();
         let st = sync_workspace(&a, "test-remote", "origin").expect("A 首次同步");
@@ -298,7 +333,10 @@ mod tests {
 
         // B 拉取
         let b = base.join("b");
-        git_in(&base, &["clone", bare.to_str().unwrap(), b.to_str().unwrap()]);
+        git_in(
+            &base,
+            &["clone", bare.to_str().unwrap(), b.to_str().unwrap()],
+        );
         setup_identity(&b);
         let st2 = sync_workspace(&b, "test-remote", "origin").expect("B 拉取");
         assert!(st2.ok);
@@ -316,7 +354,10 @@ mod tests {
         assert_eq!(st3.conflicts, 1);
         assert_eq!(st3.remote_wins, 0, "B 的 mtime 更新，应本地胜");
         let b_content = std::fs::read_to_string(b.join("conflict.md")).unwrap();
-        assert!(b_content.contains("version B"), "B 的较新版本应保留: {b_content}");
+        assert!(
+            b_content.contains("version B"),
+            "B 的较新版本应保留: {b_content}"
+        );
 
         // A 拉取到 B 胜出的版本
         let st4 = sync_workspace(&a, "test-remote", "origin").expect("A 拉取 B 胜出版本");
@@ -336,18 +377,37 @@ mod tests {
         // 场景 1：origin 指向 GitHub（外来）→ 用 sync，origin 保持原样
         let ws = base.join("ws");
         git_in(&base, &["init", "-q", "-b", "main", ws.to_str().unwrap()]);
-        git_in(&ws, &["remote", "add", "origin", "https://example.invalid/stillwrite.git"]);
+        git_in(
+            &ws,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/stillwrite.git",
+            ],
+        );
         let name = resolve_sync_remote(&ws, "user@example.invalid:~/stillwrite.git").unwrap();
         assert_eq!(name, "sync");
         let (_, origin_url) = git(&ws, &["remote", "get-url", "origin"]).unwrap();
-        assert_eq!(origin_url, "https://example.invalid/stillwrite.git", "外来 origin 不得被改写");
+        assert_eq!(
+            origin_url, "https://example.invalid/stillwrite.git",
+            "外来 origin 不得被改写"
+        );
         let (_, sync_url) = git(&ws, &["remote", "get-url", "sync"]).unwrap();
         assert_eq!(sync_url, "user@example.invalid:~/stillwrite.git");
 
         // 场景 2：origin 已指向默认远端 → 直接复用 origin
         let ws2 = base.join("ws2");
         git_in(&base, &["init", "-q", "-b", "main", ws2.to_str().unwrap()]);
-        git_in(&ws2, &["remote", "add", "origin", "user@example.invalid:~/stillwrite.git"]);
+        git_in(
+            &ws2,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "user@example.invalid:~/stillwrite.git",
+            ],
+        );
         let name2 = resolve_sync_remote(&ws2, "user@example.invalid:~/stillwrite.git").unwrap();
         assert_eq!(name2, "origin");
 
@@ -366,16 +426,25 @@ mod tests {
     fn remote_wins_when_local_mtime_stale() {
         let base = fresh_dir("base2");
         let bare = base.join("repo.git");
-        git_in(&base, &["init", "--bare", "-b", "main", bare.to_str().unwrap()]);
+        git_in(
+            &base,
+            &["init", "--bare", "-b", "main", bare.to_str().unwrap()],
+        );
 
         let a = base.join("a");
-        git_in(&base, &["clone", bare.to_str().unwrap(), a.to_str().unwrap()]);
+        git_in(
+            &base,
+            &["clone", bare.to_str().unwrap(), a.to_str().unwrap()],
+        );
         setup_identity(&a);
         std::fs::write(a.join("doc.md"), "v1 from A\n").unwrap();
         sync_workspace(&a, "test-remote", "origin").expect("A 推送 v1");
 
         let b = base.join("b");
-        git_in(&base, &["clone", bare.to_str().unwrap(), b.to_str().unwrap()]);
+        git_in(
+            &base,
+            &["clone", bare.to_str().unwrap(), b.to_str().unwrap()],
+        );
         setup_identity(&b);
         std::fs::write(b.join("doc.md"), "v2 from B\n").unwrap();
         sync_workspace(&b, "test-remote", "origin").expect("B 推送 v2");
@@ -385,7 +454,8 @@ mod tests {
         std::fs::write(&p, "v3 from A (stale mtime)\n").unwrap();
         let f = std::fs::File::open(&p).unwrap();
         let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-        f.set_times(std::fs::FileTimes::new().set_modified(past)).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(past))
+            .unwrap();
         drop(f);
 
         let st = sync_workspace(&a, "test-remote", "origin").expect("A 陈旧 mtime 同步");

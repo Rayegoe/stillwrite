@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager};
@@ -23,10 +23,7 @@ pub struct CreateAgentWorkInput {
     pub prompt: String,
     pub origin_uri: Option<String>,
     pub origin_quote: Option<String>,
-    pub thread_id: Option<String>,
-    pub conversation_id: Option<String>,
-    pub run_id: Option<String>,
-    pub receipt_ref: Option<String>,
+    pub pi_session_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -37,18 +34,63 @@ pub struct WriteAgentWorkInput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AgentWorkMeta {
     id: String,
     title: String,
     prompt: String,
+    #[serde(default)]
     origin_uri: Option<String>,
+    #[serde(default)]
     origin_quote: Option<String>,
     created_at: u64,
     updated_at: u64,
+    #[serde(default)]
+    pi_session_ref: Option<String>,
+}
+
+/// The old sidecar is read only as a compatibility input.  It is projected
+/// into `AgentWorkMeta` and is never serialized again.
+#[derive(Clone, Debug, Deserialize)]
+struct LegacyAgentWorkMeta {
+    id: String,
+    title: String,
+    prompt: String,
+    #[serde(default)]
+    origin_uri: Option<String>,
+    #[serde(default)]
+    origin_quote: Option<String>,
+    created_at: u64,
+    updated_at: u64,
+    #[serde(default)]
     thread_id: Option<String>,
+    #[serde(default)]
     conversation_id: Option<String>,
+    #[serde(default)]
     run_id: Option<String>,
+    #[serde(default)]
     receipt_ref: Option<String>,
+}
+
+impl LegacyAgentWorkMeta {
+    fn into_current(self) -> AgentWorkMeta {
+        let _ = (
+            self.thread_id,
+            self.conversation_id,
+            self.run_id,
+            self.receipt_ref,
+        );
+        AgentWorkMeta {
+            id: self.id,
+            title: self.title,
+            prompt: self.prompt,
+            origin_uri: self.origin_uri,
+            origin_quote: self.origin_quote,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            pi_session_ref: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -65,10 +107,7 @@ pub struct AgentWorkDocument {
     pub created_at: u64,
     pub updated_at: u64,
     pub status: String,
-    pub thread_id: Option<String>,
-    pub conversation_id: Option<String>,
-    pub run_id: Option<String>,
-    pub receipt_ref: Option<String>,
+    pub pi_session_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -83,7 +122,7 @@ pub struct AgentWorkSummary {
     pub created_at: u64,
     pub updated_at: u64,
     pub status: String,
-    pub thread_id: Option<String>,
+    pub pi_session_ref: Option<String>,
 }
 
 pub fn workspace_key(workspace_root: &Path) -> String {
@@ -134,6 +173,7 @@ pub fn create(
     } else {
         input.title.trim().to_string()
     };
+    let pi_session_ref = validate_session_ref(input.pi_session_ref.as_deref())?;
     let now = unix_timestamp();
     let meta = AgentWorkMeta {
         id: id.clone(),
@@ -143,19 +183,13 @@ pub fn create(
         origin_quote: input.origin_quote,
         created_at: now,
         updated_at: now,
-        thread_id: input.thread_id,
-        conversation_id: input.conversation_id,
-        run_id: input.run_id,
-        receipt_ref: input.receipt_ref,
+        pi_session_ref,
     };
     write_document(&root, &meta, &input.content)?;
     read_at(app, workspace_root, &id)
 }
 
-pub fn list(
-    app: &AppHandle,
-    workspace_root: &Path,
-) -> Result<Vec<AgentWorkSummary>, String> {
+pub fn list(app: &AppHandle, workspace_root: &Path) -> Result<Vec<AgentWorkSummary>, String> {
     let root = works_root(app, workspace_root)?;
     let mut works = Vec::new();
     for entry in fs::read_dir(&root)
@@ -187,11 +221,7 @@ pub fn read_at(
     let meta = read_meta(&root, id)?;
     let content = fs::read_to_string(document_path(&root, id))
         .map_err(|e| format!("读取 Agent 工作失败: {e}"))?;
-    Ok(document_from_meta(
-        workspace_root,
-        meta,
-        content,
-    ))
+    Ok(document_from_meta(workspace_root, meta, content))
 }
 
 pub fn write_at(
@@ -217,8 +247,17 @@ fn write_document(root: &Path, meta: &AgentWorkMeta, content: &str) -> Result<()
 fn read_meta(root: &Path, id: &str) -> Result<AgentWorkMeta, String> {
     let path = meta_path(root, id);
     if path.is_file() {
-        let body = fs::read_to_string(&path).map_err(|e| format!("读取 Agent 工作元数据失败: {e}"))?;
-        return serde_json::from_str(&body).map_err(|e| format!("解析 Agent 工作元数据失败: {e}"));
+        let body =
+            fs::read_to_string(&path).map_err(|e| format!("读取 Agent 工作元数据失败: {e}"))?;
+        return match serde_json::from_str::<AgentWorkMeta>(&body) {
+            Ok(meta) => validate_meta(meta),
+            Err(v2_error) => serde_json::from_str::<LegacyAgentWorkMeta>(&body)
+                .map(LegacyAgentWorkMeta::into_current)
+                .map_err(|legacy_error| {
+                    format!("解析 Agent 工作元数据失败: {v2_error}; legacy: {legacy_error}")
+                })
+                .and_then(validate_meta),
+        };
     }
     let content = fs::read_to_string(document_path(root, id))
         .map_err(|e| format!("读取 Agent 工作失败: {e}"))?;
@@ -231,10 +270,7 @@ fn read_meta(root: &Path, id: &str) -> Result<AgentWorkMeta, String> {
         origin_quote: None,
         created_at: now,
         updated_at: now,
-        thread_id: None,
-        conversation_id: None,
-        run_id: None,
-        receipt_ref: None,
+        pi_session_ref: None,
     })
 }
 
@@ -256,10 +292,7 @@ fn document_from_meta(
         created_at: meta.created_at,
         updated_at: meta.updated_at,
         status: "completed".into(),
-        thread_id: meta.thread_id,
-        conversation_id: meta.conversation_id,
-        run_id: meta.run_id,
-        receipt_ref: meta.receipt_ref,
+        pi_session_ref: meta.pi_session_ref,
     }
 }
 
@@ -274,7 +307,7 @@ fn summary(document: &AgentWorkDocument) -> AgentWorkSummary {
         created_at: document.created_at,
         updated_at: document.updated_at,
         status: document.status.clone(),
-        thread_id: document.thread_id.clone(),
+        pi_session_ref: document.pi_session_ref.clone(),
     }
 }
 
@@ -284,6 +317,32 @@ fn document_path(root: &Path, id: &str) -> PathBuf {
 
 fn meta_path(root: &Path, id: &str) -> PathBuf {
     root.join(format!("{id}.json"))
+}
+
+fn validate_meta(meta: AgentWorkMeta) -> Result<AgentWorkMeta, String> {
+    validate_session_ref(meta.pi_session_ref.as_deref())?;
+    Ok(meta)
+}
+
+fn validate_session_ref(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = Path::new(value);
+    if value.is_empty()
+        || value.contains('\0')
+        || value.contains('\\')
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err("Pi session 引用必须是 session 目录内的相对路径".into());
+    }
+    Ok(Some(value.to_string()))
 }
 
 fn validate_id(id: &str) -> Result<(), String> {
@@ -335,4 +394,111 @@ fn title_from_content(content: &str) -> String {
         value.push('…');
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "stillwrite-agent-work-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn v2_metadata_writes_only_product_fields() {
+        let root = temp_dir("v2-fields");
+        let meta = AgentWorkMeta {
+            id: "work-1".into(),
+            title: "A work".into(),
+            prompt: "Rewrite this".into(),
+            origin_uri: Some("workspace://a.md".into()),
+            origin_quote: Some("A quote".into()),
+            created_at: 1,
+            updated_at: 2,
+            pi_session_ref: Some("session.jsonl".into()),
+        };
+        write_document(&root, &meta, "# A work\n").unwrap();
+        let body: Value =
+            serde_json::from_str(&fs::read_to_string(meta_path(&root, "work-1")).unwrap()).unwrap();
+        let keys = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            [
+                "created_at",
+                "id",
+                "origin_quote",
+                "origin_uri",
+                "pi_session_ref",
+                "prompt",
+                "title",
+                "updated_at",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect()
+        );
+        assert_eq!(
+            read_meta(&root, "work-1")
+                .unwrap()
+                .pi_session_ref
+                .as_deref(),
+            Some("session.jsonl")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_metadata_is_read_and_projects_to_v2_on_write() {
+        let root = temp_dir("legacy-fields");
+        fs::write(document_path(&root, "work-legacy"), "# Legacy\n").unwrap();
+        fs::write(
+            meta_path(&root, "work-legacy"),
+            r#"{
+              "id":"work-legacy",
+              "title":"Legacy",
+              "prompt":"old prompt",
+              "origin_uri":null,
+              "origin_quote":null,
+              "created_at":10,
+              "updated_at":11,
+              "thread_id":"thread",
+              "conversation_id":"conversation",
+              "run_id":"run",
+              "receipt_ref":"receipt"
+            }"#,
+        )
+        .unwrap();
+        let legacy = read_meta(&root, "work-legacy").unwrap();
+        assert_eq!(legacy.id, "work-legacy");
+        assert_eq!(legacy.pi_session_ref, None);
+        write_document(&root, &legacy, "# Legacy edited\n").unwrap();
+        let body = fs::read_to_string(meta_path(&root, "work-legacy")).unwrap();
+        assert!(!body.contains("thread_id"));
+        assert!(!body.contains("receipt_ref"));
+        assert!(serde_json::from_str::<AgentWorkMeta>(&body).is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn session_reference_must_be_relative() {
+        assert!(validate_session_ref(Some("../outside.jsonl")).is_err());
+        assert!(validate_session_ref(Some("/tmp/outside.jsonl")).is_err());
+        assert!(validate_session_ref(Some("sessions\\outside.jsonl")).is_err());
+        assert_eq!(
+            validate_session_ref(Some("2026/session.jsonl")).unwrap(),
+            Some("2026/session.jsonl".into())
+        );
+    }
 }

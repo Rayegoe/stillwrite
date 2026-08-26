@@ -1,4 +1,5 @@
 const invoke = window.__TAURI__.core.invoke;
+const listen = window.__TAURI__.event?.listen;
 
 const shell = document.querySelector("#shell");
 const sidebar = document.querySelector("#sidebar");
@@ -27,6 +28,17 @@ const addLibrarySourceButton = document.querySelector("#addLibrarySource");
 const newAgentWorkButton = document.querySelector("#newAgentWorkButton");
 const libraryMeta = document.querySelector("#libraryMeta");
 const libraryStats = document.querySelector("#libraryStats");
+const feedStatusLine = document.querySelector("#feedStatusLine");
+const sourceMenu = document.querySelector("#sourceMenu");
+const addLibrarySourceMenuItem = document.querySelector(
+	"#addLibrarySourceMenuItem",
+);
+const addFeedMenuItem = document.querySelector("#addFeedMenuItem");
+const importOpmlMenuItem = document.querySelector("#importOpmlMenuItem");
+const addFeedDialog = document.querySelector("#addFeedDialog");
+const addFeedForm = document.querySelector("#addFeedForm");
+const addFeedUrl = document.querySelector("#addFeedUrl");
+const cancelAddFeed = document.querySelector("#cancelAddFeed");
 const agentMeta = document.querySelector("#agentMeta");
 const agentStats = document.querySelector("#agentStats");
 const worksetBar = document.querySelector("#worksetBar");
@@ -69,6 +81,8 @@ const annotateSaveState = document.querySelector("#annotateSaveState");
 const annotateFoot = document.querySelector("#annotateFoot");
 const AnnotationCodec = window.StillwriteAnnotations;
 const DocumentLinks = window.StillwriteDocumentLinks;
+const AgentEvents = window.StillwriteAgentEvents;
+const Feeds = window.StillwriteFeeds;
 const askAgentButton = document.querySelector("#askAgentButton");
 const agentAskDialog = document.querySelector("#agentAskDialog");
 const agentAskForm = document.querySelector("#agentAskForm");
@@ -89,6 +103,11 @@ let libraryMode = false;
 let agentMode = false;
 let librarySources = [];
 let libraryStatsData = { total_documents: 0, unique_documents: 0 };
+const feedSources = [];
+const feedRecent = [];
+const rssLibrarySource = null;
+const feedLastRefreshAt = null;
+const feedBusy = false;
 const citationBasket = new Map();
 let agentWorkItems = [];
 let pendingAgentRequest = null;
@@ -125,7 +144,7 @@ let relatedHasSearched = false;
 let relatedSupplementSeeds = [];
 const RELATED_PIN_STORAGE_KEY = "stillwrite.relatedPinned.v1";
 const RELATED_PIN_SCOPE_SEPARATOR = "\u001f";
-let relatedPinnedItems = loadRelatedPinnedItems();
+const relatedPinnedItems = loadRelatedPinnedItems();
 
 const DEFAULT_REMOTE = "user@example.invalid:~/stillwrite.git";
 let autoSync = false; // 首次手动同步成功后开启自动同步
@@ -134,13 +153,13 @@ let searchTimer = null;
 let previewTimer = null;
 let lastTreeNodes = [];
 let documentLinkIndex = DocumentLinks.buildIndex([], rootPath);
-const agentSessionId =
-	globalThis.crypto?.randomUUID?.() ||
-	`gui-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 let agentBusy = false;
 let agentProbed = false;
 let agentCancelRequested = false;
 let activeAgentRunId = null;
+let agentEventUnlisten = null;
+let agentEventListenerPromise = null;
+const agentRunWaiters = new Map();
 
 const ALLOWED_PREVIEW_TAGS = new Set([
 	"P",
@@ -190,7 +209,8 @@ function currentDocumentRef() {
 			contentHash: currentLibraryDocument.content_hash,
 		};
 	}
-	if (currentAgentDocument) return { kind: "agent", id: currentAgentDocument.id };
+	if (currentAgentDocument)
+		return { kind: "agent", id: currentAgentDocument.id };
 	return null;
 }
 
@@ -223,15 +243,17 @@ function libraryRefFor(hit, document = hit) {
 function isWorkspaceDocumentForRelated() {
 	return Boolean(
 		currentFile &&
-		!currentLibraryDocument &&
-		!currentAgentDocument &&
-		!libraryMode &&
-		!agentMode,
+			!currentLibraryDocument &&
+			!currentAgentDocument &&
+			!libraryMode &&
+			!agentMode,
 	);
 }
 
 function relatedText(value) {
-	return String(value || "").replace(/\s+/g, " ").trim();
+	return String(value || "")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 function relatedKey(value) {
@@ -248,8 +270,11 @@ function relatedPath(value) {
 
 function loadRelatedPinnedItems() {
 	try {
-		const parsed = JSON.parse(localStorage.getItem(RELATED_PIN_STORAGE_KEY) || "{}");
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+		const parsed = JSON.parse(
+			localStorage.getItem(RELATED_PIN_STORAGE_KEY) || "{}",
+		);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+			return new Map();
 		return new Map(
 			Object.entries(parsed).filter(
 				([storageKey, item]) =>
@@ -474,9 +499,9 @@ function isRelatedKeyword(value) {
 	const key = relatedKey(value);
 	return Boolean(
 		key &&
-		!RELATED_STOPWORDS.has(key) &&
-		!(/^[a-z]$/i.test(key)) &&
-		!(/^[\u3400-\u4dbf\u4e00-\u9fff]$/.test(key)),
+			!RELATED_STOPWORDS.has(key) &&
+			!/^[a-z]$/i.test(key) &&
+			!/^[\u3400-\u4dbf\u4e00-\u9fff]$/.test(key),
 	);
 }
 
@@ -510,7 +535,8 @@ function relatedCjkSegments(run) {
 function extractRelatedKeywordCandidates(value, source, weight) {
 	const map = new Map();
 	const text = stripRelatedMarkdown(value);
-	const tokenPattern = /[A-Za-z][A-Za-z0-9+#._-]*|[\u3400-\u4dbf\u4e00-\u9fff]+/g;
+	const tokenPattern =
+		/[A-Za-z][A-Za-z0-9+#._-]*|[\u3400-\u4dbf\u4e00-\u9fff]+/g;
 	for (const match of text.matchAll(tokenPattern)) {
 		const token = match[0];
 		if (/^[A-Za-z]/.test(token)) {
@@ -526,11 +552,21 @@ function extractRelatedKeywordCandidates(value, source, weight) {
 					priority: 100 + segment.length,
 				});
 			} else {
-				for (let index = 0; index + 3 <= segment.length && index < 12; index += 2) {
-					addRelatedKeyword(map, segment.slice(index, index + 3), source, weight, {
-						isPhrase: true,
-						priority: 92 - index,
-					});
+				for (
+					let index = 0;
+					index + 3 <= segment.length && index < 12;
+					index += 2
+				) {
+					addRelatedKeyword(
+						map,
+						segment.slice(index, index + 3),
+						source,
+						weight,
+						{
+							isPhrase: true,
+							priority: 92 - index,
+						},
+					);
 				}
 			}
 			if (segment.length >= 4) {
@@ -565,9 +601,7 @@ function firstRelatedParagraph(source) {
 function relatedSeedCandidates() {
 	if (!isWorkspaceDocumentForRelated()) return [];
 	const source = editor.value.replace(/\r\n?/g, "\n");
-	const h1Line = source
-		.split("\n")
-		.find((line) => /^\s{0,3}#\s+/.test(line));
+	const h1Line = source.split("\n").find((line) => /^\s{0,3}#\s+/.test(line));
 	const h1 = h1Line ? h1Line.replace(/^\s{0,3}#\s+/, "") : "";
 	const h1Candidates = extractRelatedKeywordCandidates(h1, "h1", 1);
 	const filename = basename(currentFile).replace(/\.(md|markdown)$/i, "");
@@ -575,17 +609,23 @@ function relatedSeedCandidates() {
 		filename && !isGenericRelatedFilename(filename)
 			? extractRelatedKeywordCandidates(filename, "filename", 0.6)
 			: [];
-	const titleCandidates = h1Candidates.length ? h1Candidates : filenameCandidates;
+	const titleCandidates = h1Candidates.length
+		? h1Candidates
+		: filenameCandidates;
 	const supplementCandidates = relatedSupplementSeeds.flatMap((text, index) =>
-		extractRelatedKeywordCandidates(text, "selection", 1.2).map((candidate) => ({
-			...candidate,
-			priority: candidate.priority + 18 - index,
-		})),
+		extractRelatedKeywordCandidates(text, "selection", 1.2).map(
+			(candidate) => ({
+				...candidate,
+				priority: candidate.priority + 18 - index,
+			}),
+		),
 	);
 	const candidates = [
 		...supplementCandidates.slice(0, 4),
 		...titleCandidates.slice(0, 5),
-		...(h1Candidates.length ? filenameCandidates.slice(0, 2) : filenameCandidates.slice(5, 7)),
+		...(h1Candidates.length
+			? filenameCandidates.slice(0, 2)
+			: filenameCandidates.slice(5, 7)),
 	];
 
 	if (titleCandidates.length < 2) {
@@ -598,7 +638,9 @@ function relatedSeedCandidates() {
 		);
 	}
 
-	const english = h1Candidates.find((candidate) => /^[A-Za-z]/.test(candidate.query));
+	const english = h1Candidates.find((candidate) =>
+		/^[A-Za-z]/.test(candidate.query),
+	);
 	const cjkPhrase = h1Candidates
 		.filter(
 			(candidate) =>
@@ -618,16 +660,20 @@ function relatedSeedCandidates() {
 	}
 
 	const seen = new Set();
-	return candidates.filter((candidate) => {
-		const key = relatedKey(candidate.query);
-		if (!key || seen.has(key)) return false;
-		seen.add(key);
-		return true;
-	}).slice(0, 6);
+	return candidates
+		.filter((candidate) => {
+			const key = relatedKey(candidate.query);
+			if (!key || seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		})
+		.slice(0, 6);
 }
 
 function relatedFingerprint(candidates) {
-	return candidates.map((candidate) => relatedKey(candidate.query)).join("\u001f");
+	return candidates
+		.map((candidate) => relatedKey(candidate.query))
+		.join("\u001f");
 }
 
 function renderRelatedToolbar() {
@@ -714,7 +760,9 @@ function renderRelatedPanel() {
 		pin.type = "button";
 		pin.className = "related-card-pin";
 		pin.setAttribute("aria-pressed", String(Boolean(item.pinned)));
-		pin.title = item.pinned ? "取消固定这条关联" : "固定这条关联，不受检索刷新影响";
+		pin.title = item.pinned
+			? "取消固定这条关联"
+			: "固定这条关联，不受检索刷新影响";
 		pin.textContent = item.pinned ? "★ 已固定" : "☆ 固定";
 		pin.addEventListener("click", (event) => {
 			event.stopPropagation();
@@ -871,9 +919,10 @@ function mergeRelatedHits(batches) {
 	let order = 0;
 	for (const batch of batches) {
 		batch.hits.forEach((hit, rank) => {
-			const item = batch.plane === "workspace"
-				? normalizeRelatedWorkspaceHit(hit, batch.candidate, rank)
-				: normalizeRelatedLibraryHit(hit, batch.candidate, rank);
+			const item =
+				batch.plane === "workspace"
+					? normalizeRelatedWorkspaceHit(hit, batch.candidate, rank)
+					: normalizeRelatedLibraryHit(hit, batch.candidate, rank);
 			if (!item) return;
 			item.pinned = isRelatedPinned(item);
 			const existing = merged.get(item.key);
@@ -903,8 +952,8 @@ function mergeRelatedHits(batches) {
 	}
 
 	const categoryOrder = { annotation: 0, workspace: 1, library: 2 };
-	const sorted = [...merged.values()]
-		.sort((a, b) =>
+	const sorted = [...merged.values()].sort(
+		(a, b) =>
 			Number(b.pinned) - Number(a.pinned) ||
 			b.score - a.score ||
 			b.matchedQueries.size - a.matchedQueries.size ||
@@ -914,7 +963,7 @@ function mergeRelatedHits(batches) {
 			a.title.localeCompare(b.title, "zh-CN") ||
 			a.source.localeCompare(b.source, "zh-CN") ||
 			a.order - b.order,
-		);
+	);
 	const pinned = sorted.filter((item) => item.pinned);
 	const unpinned = sorted.filter((item) => !item.pinned).slice(0, 5);
 	return [...pinned, ...unpinned];
@@ -937,12 +986,12 @@ async function refreshRelated() {
 
 	const batches = await Promise.all(
 		candidates.flatMap((candidate) => [
-				searchRelatedPlane("search_related_index", candidate).then((hits) => ({
+			searchRelatedPlane("search_related_index", candidate).then((hits) => ({
 				candidate,
 				plane: "workspace",
 				hits,
 			})),
-				searchRelatedPlane("search_related_library", candidate).then((hits) => ({
+			searchRelatedPlane("search_related_library", candidate).then((hits) => ({
 				candidate,
 				plane: "library",
 				hits,
@@ -1017,7 +1066,9 @@ async function loadCitationContext() {
 				`### ${document.title}\n来源：${document.source_name} · ${document.relative_path}\n引用：${document.uri}\n\n${content}`,
 			);
 		} catch (error) {
-			sections.push(`### ${hit.title}\n引用：${hit.uri}\n（读取失败：${String(error)}）`);
+			sections.push(
+				`### ${hit.title}\n引用：${hit.uri}\n（读取失败：${String(error)}）`,
+			);
 		}
 	}
 	return [
@@ -1025,6 +1076,55 @@ async function loadCitationContext() {
 		sections.join("\n\n---\n\n"),
 		"以上是当前引用。",
 	].join("\n\n");
+}
+
+function waitForAgentRun(runId) {
+	return new Promise((resolve, reject) => {
+		agentRunWaiters.set(runId, { resolve, reject });
+	});
+}
+
+function rejectAgentRunWaiter(runId, error) {
+	const waiter = agentRunWaiters.get(runId);
+	if (!waiter) return;
+	agentRunWaiters.delete(runId);
+	waiter.reject(error);
+}
+
+function handleAgentEvent(envelope) {
+	const payload =
+		envelope?.payload && typeof envelope.payload === "object"
+			? envelope.payload
+			: envelope;
+	const runId = payload?.runId;
+	if (!runId) return;
+	const run = localAgentRuns.find((item) => item.id === runId);
+	if (!run || !AgentEvents) return;
+	Object.assign(run, AgentEvents.applyAgentEvent(run, payload));
+	if (agentMode) renderAgentWorks();
+	if (AgentEvents.TERMINAL_EVENTS.has(payload.type)) {
+		const waiter = agentRunWaiters.get(runId);
+		if (waiter) {
+			agentRunWaiters.delete(runId);
+			waiter.resolve(payload);
+		}
+	}
+}
+
+async function installAgentEventListener() {
+	if (agentEventUnlisten) return;
+	if (!agentEventListenerPromise) {
+		agentEventListenerPromise = (async () => {
+			if (typeof listen !== "function") {
+				throw new Error("StillWrite 无法订阅 Pi Agent 事件");
+			}
+			agentEventUnlisten = await listen("agent-event", handleAgentEvent);
+		})();
+		agentEventListenerPromise.catch(() => {
+			agentEventListenerPromise = null;
+		});
+	}
+	await agentEventListenerPromise;
 }
 
 async function probeAgent() {
@@ -1045,10 +1145,11 @@ function formatAgentTime(value) {
 }
 
 function agentWorkTitle(prompt) {
-	const firstLine = prompt
-		.split(/\r?\n/)
-		.map((line) => line.trim())
-		.find(Boolean) || "Agent 工作";
+	const firstLine =
+		prompt
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.find(Boolean) || "Agent 工作";
 	const clean = firstLine.replace(/^#+\s*/, "").replace(/[。！？.!?]+$/, "");
 	return clean.length > 56 ? `${clean.slice(0, 56)}…` : clean;
 }
@@ -1069,6 +1170,10 @@ function makeLocalAgentRun(request, prompt) {
 		originQuote: request?.originQuote || null,
 		updatedAt: Math.floor(Date.now() / 1000),
 		status: "running",
+		streamText: "",
+		preview: "",
+		toolStatus: "",
+		terminal: false,
 		local: true,
 	};
 }
@@ -1080,28 +1185,44 @@ function allAgentWorkItems() {
 }
 
 function buildAgentPrompt(request, prompt, citationContext) {
-	const context = [];
-	if (request?.originUri) context.push(`当前来源：${request.originUri}`);
-	if (request?.originQuote) {
-		context.push(`当前选区：\n> ${request.originQuote.replaceAll("\n", "\n> ")}`);
-	}
-	if (citationContext) context.push(citationContext);
-	context.push(`用户请求：\n${prompt}`);
-	return context.join("\n\n");
+	const source = request?.originUri || "（当前工作没有明确来源文档）";
+	const selected = request?.originQuote
+		? `> ${request.originQuote.replaceAll("\n", "\n> ")}`
+		: "（没有选中文本）";
+	return [
+		`# Current source\n${source}`,
+		`# Selected text\n${selected}`,
+		citationContext
+			? `# Explicit references\n${citationContext}`
+			: "# Explicit references\n（没有显式引用资料）",
+		`# User request\n${prompt}`,
+	].join("\n\n");
 }
 
 async function cancelAgentTurn() {
-	if (!agentBusy) return;
+	if (!agentBusy || !activeAgentRunId) return false;
+	agentCancelRequested = true;
+	const run = localAgentRuns.find((item) => item.id === activeAgentRunId);
+	if (run) {
+		run.status = "停止中";
+		run.updatedAt = Math.floor(Date.now() / 1000);
+		renderAgentWorks();
+	}
 	try {
-		agentCancelRequested = await invoke("agent_cancel");
-		const run = localAgentRuns.find((item) => item.id === activeAgentRunId);
-		if (run) {
-			run.status = "停止中";
-			run.updatedAt = Math.floor(Date.now() / 1000);
-			renderAgentWorks();
-		}
+		const response = await invoke("agent_abort");
+		// The command also emits this event from Rust.  Applying the local
+		// acknowledgement makes a workspace switch safe even if the WebView
+		// receives that event after the switch has returned.
+		handleAgentEvent({ type: "agent_stopped", runId: activeAgentRunId });
+		return Boolean(response?.accepted);
 	} catch (error) {
 		console.error("停止 Agent 失败", error);
+		handleAgentEvent({
+			type: "error",
+			runId: activeAgentRunId,
+			message: String(error),
+		});
+		return false;
 	}
 }
 
@@ -1120,13 +1241,13 @@ function renderInline(text) {
 	value = value.replace(
 		/\[([^\]]+)\]\((?:&lt;([^>]+)&gt;|([^)\s]+))\)/g,
 		(_, label, angleHref, plainHref) => {
-		const href = angleHref || plainHref;
-		const raw = href.replaceAll("&amp;", "&");
-		const safe = /^\s*(?:javascript|data):/i.test(raw) ? "#" : href;
-		const target = /^https?:/i.test(raw)
-			? ' target="_blank" rel="noreferrer"'
-			: "";
-		return `<a href="${safe}"${target}>${label}</a>`;
+			const href = angleHref || plainHref;
+			const raw = href.replaceAll("&amp;", "&");
+			const safe = /^\s*(?:javascript|data):/i.test(raw) ? "#" : href;
+			const target = /^https?:/i.test(raw)
+				? ' target="_blank" rel="noreferrer"'
+				: "";
+			return `<a href="${safe}"${target}>${label}</a>`;
 		},
 	);
 	code.forEach(({ token, html }) => {
@@ -1147,7 +1268,9 @@ function renderMarkdown(source) {
 	const flushParagraph = () => {
 		if (!paragraph.length) return;
 		// 段落内软换行保留为 <br>：多行笔记（如批注正文）不会在阅读区被并成一行
-		html.push(`<p>${paragraph.map((line) => renderInline(line)).join("<br>")}</p>`);
+		html.push(
+			`<p>${paragraph.map((line) => renderInline(line)).join("<br>")}</p>`,
+		);
 		paragraph = [];
 	};
 	const closeList = () => {
@@ -1166,7 +1289,9 @@ function renderMarkdown(source) {
 
 	for (const line of lines) {
 		// 批注侧车中的结构标记是 Markdown 注释，阅读时不应显示。
-		if (/^<!-- \/?stillwrite-(?:annotations|annotation|quote)/.test(line.trim()))
+		if (
+			/^<!-- \/?stillwrite-(?:annotations|annotation|quote)/.test(line.trim())
+		)
 			continue;
 		if (
 			currentFile &&
@@ -1300,7 +1425,10 @@ function linkifyPreviewText(root) {
 	let node;
 	while ((node = walker.nextNode())) nodes.push(node);
 	nodes.forEach((textNode) => {
-		const segments = DocumentLinks.segmentText(textNode.data, documentLinkIndex);
+		const segments = DocumentLinks.segmentText(
+			textNode.data,
+			documentLinkIndex,
+		);
 		if (!segments.some((segment) => segment.type)) return;
 		const fragment = document.createDocumentFragment();
 		segments.forEach((segment) => {
@@ -1412,35 +1540,312 @@ function updateLibrarySummary(result) {
 
 function renderLibraryHome() {
 	treeEl.replaceChildren();
-	if (!librarySources.length) {
+	const fragment = document.createDocumentFragment();
+
+	const section = document.createElement("div");
+	section.className = "library-section";
+	const title = document.createElement("div");
+	title.className = "library-section-title";
+	title.textContent = "来源";
+	section.appendChild(title);
+
+	const regularSources = rssLibrarySource
+		? librarySources.filter((source) => source.id !== rssLibrarySource.id)
+		: librarySources;
+	if (!regularSources.length && !feedSources.length) {
 		const tip = document.createElement("div");
 		tip.className = "empty-tip";
-		tip.textContent = "还没有资料源。点击右上角 ＋ 添加外部 Markdown 目录。";
-		treeEl.appendChild(tip);
+		tip.textContent =
+			"还没有资料源。点击右上角 ＋ 添加外部 Markdown 目录、RSS，或导入 OPML。";
+		section.appendChild(tip);
+	} else {
+		for (const source of regularSources) {
+			const row = document.createElement("div");
+			row.className = `library-source${source.available ? "" : " unavailable"}`;
+			row.title = source.root;
+			const name = document.createElement("div");
+			name.className = "library-source-name";
+			const label = document.createElement("span");
+			label.textContent = source.name;
+			const count = document.createElement("span");
+			count.className = "library-source-count";
+			count.textContent = source.available
+				? `${source.documents.toLocaleString()} 篇`
+				: "目录不可用";
+			name.append(label, count);
+			const root = document.createElement("div");
+			root.className = "library-source-root";
+			root.textContent = source.root;
+			row.append(name, root);
+			fragment.appendChild(row);
+		}
+		if (rssLibrarySource) fragment.appendChild(renderRssSection());
+	}
+	section.appendChild(fragment);
+	treeEl.appendChild(section);
+}
+
+function renderRssSection() {
+	const wrap = document.createElement("div");
+	wrap.className = "rss-section";
+
+	const row = document.createElement("div");
+	row.className = "library-source rss-row";
+	row.title = "点击展开 / 收起 RSS 源列表";
+	const name = document.createElement("div");
+	name.className = "library-source-name";
+	const label = document.createElement("span");
+	label.textContent = "RSS";
+	const count = document.createElement("span");
+	count.className = "library-source-count";
+	count.id = "rssSourceCount";
+	count.textContent = Feeds.rssSourceCountText(feedSources, rssLibrarySource);
+	name.append(label, count);
+	const actions = document.createElement("div");
+	actions.className = "library-source-actions";
+	const refreshAll = document.createElement("button");
+	refreshAll.type = "button";
+	refreshAll.className = "text-btn";
+	refreshAll.textContent = "刷新全部";
+	refreshAll.title =
+		"后台抓取全部 RSS 源（最多 4 路并发），完成后刷新 Library 索引";
+	refreshAll.disabled = feedBusy;
+	refreshAll.addEventListener("click", (event) => {
+		event.stopPropagation();
+		void refreshAllFeeds();
+	});
+	actions.appendChild(refreshAll);
+	row.append(name, actions);
+	wrap.appendChild(row);
+
+	const listWrap = document.createElement("div");
+	listWrap.className = "feed-list-wrap collapsed";
+	const feedList = document.createElement("div");
+	feedList.className = "feed-list";
+	if (!feedSources.length) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip";
+		tip.textContent = "点击右上角 ＋ → 添加 RSS，或导入 OPML。";
+		feedList.appendChild(tip);
+	} else {
+		for (const source of feedSources) {
+			feedList.appendChild(renderFeedSourceRow(source));
+		}
+	}
+	listWrap.appendChild(feedList);
+	wrap.appendChild(listWrap);
+	row.addEventListener("click", (event) => {
+		if (event.target.closest("button")) return;
+		listWrap.classList.toggle("collapsed");
+	});
+
+	const recentTitle = document.createElement("div");
+	recentTitle.className = "library-section-title recent-title";
+	recentTitle.textContent = "最近 RSS";
+	wrap.appendChild(recentTitle);
+	const recentList = document.createElement("div");
+	recentList.className = "feed-recent-list";
+	if (!feedRecent.length) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip";
+		tip.textContent = "刷新后，最新的 RSS 条目会作为普通资料出现在这里。";
+		recentList.appendChild(tip);
+	} else {
+		for (const item of feedRecent) {
+			recentList.appendChild(renderFeedRecentCard(item));
+		}
+	}
+	wrap.appendChild(recentList);
+	return wrap;
+}
+
+function renderFeedSourceRow(source) {
+	const rowEl = document.createElement("div");
+	rowEl.className = `feed-source-row${source.last_error ? " feed-error" : ""}`;
+	const head = document.createElement("div");
+	head.className = "feed-source-head";
+	const nameEl = document.createElement("span");
+	nameEl.className = "feed-source-name";
+	nameEl.textContent = source.name;
+	nameEl.title = source.url;
+	const statusEl = document.createElement("span");
+	statusEl.className = "feed-source-status";
+	statusEl.textContent = Feeds.feedSourceStatusText(source);
+	statusEl.title = source.url;
+	head.append(nameEl, statusEl);
+	const urlEl = document.createElement("div");
+	urlEl.className = "feed-source-url";
+	urlEl.textContent = source.url;
+	const actions = document.createElement("div");
+	actions.className = "feed-source-actions";
+	const refresh = document.createElement("button");
+	refresh.type = "button";
+	refresh.className = "icon-btn subtle";
+	refresh.textContent = "↻";
+	refresh.title = "刷新此源";
+	refresh.addEventListener("click", (event) => {
+		event.stopPropagation();
+		void refreshFeedSource(source.id);
+	});
+	const remove = document.createElement("button");
+	remove.type = "button";
+	remove.className = "icon-btn subtle";
+	remove.textContent = "✕";
+	remove.title = "删除此源（本地缓存随之删除，批注保留）";
+	remove.addEventListener("click", (event) => {
+		event.stopPropagation();
+		void removeFeedSource(source.id, source.name);
+	});
+	actions.append(refresh, remove);
+	rowEl.append(head, urlEl, actions);
+	return rowEl;
+}
+
+function renderFeedRecentCard(item) {
+	const card = document.createElement("button");
+	card.type = "button";
+	card.className = "feed-recent-card";
+	const meta = document.createElement("span");
+	meta.className = "feed-recent-meta";
+	const feedName = item.feed_name || "RSS";
+	const date = item.date ? item.date.replaceAll("-", ".") : "";
+	meta.textContent = date ? `${feedName} · ${date}` : feedName;
+	const title = document.createElement("strong");
+	title.className = "feed-recent-title";
+	title.textContent = item.title || item.relative_path;
+	const snippet = document.createElement("span");
+	snippet.className = "feed-recent-snippet";
+	snippet.textContent = item.snippet || "";
+	card.append(meta, title, snippet);
+	card.title = item.uri;
+	card.addEventListener("click", () => void openLibraryDocument(item));
+	return card;
+}
+
+function setSourceMenuOpen(open) {
+	sourceMenu.hidden = !open;
+}
+
+function showFeedMessage(text) {
+	feedStatusLine.textContent = text || "";
+	feedStatusLine.hidden = !text;
+}
+
+async function loadFeedStatus() {
+	try {
+		const status = await invoke("feed_status");
+		feedSources = status.sources || [];
+		feedRecent = status.recent || [];
+		rssLibrarySource = status.rss_library_source || null;
+		feedLastRefreshAt = status.last_refresh_at || null;
+		if (libraryMode) renderLibraryHome();
+		return status;
+	} catch (error) {
+		console.error("读取 Feed 状态失败", error);
+		return null;
+	}
+}
+
+function submitAddFeed(event) {
+	event.preventDefault();
+	const url = addFeedUrl.value.trim();
+	if (!url) return;
+	addFeedDialog.close();
+	addFeedUrl.value = "";
+	void (async () => {
+		try {
+			const view = await invoke("feed_add_source", { url });
+			showFeedMessage(`已添加「${view.name}」，后台抓取中…`);
+		} catch (error) {
+			console.error(error);
+			showFeedMessage(String(error));
+		}
+		await Promise.all([refreshLibrary(), loadFeedStatus()]);
+		if (!libraryMode) await setSidebarMode("library");
+	})();
+}
+
+async function importOpml() {
+	try {
+		const result = await invoke("feed_import_opml");
+		const warning = result.warnings?.length
+			? `（${result.warnings[0]}${result.warnings.length > 1 ? ` 等 ${result.warnings.length} 条警告` : ""}）`
+			: "";
+		showFeedMessage(
+			`已添加 ${result.added} 个，${result.duplicates} 个已存在，${result.invalid} 个无效。${warning}`,
+		);
+		await Promise.all([refreshLibrary(), loadFeedStatus()]);
+	} catch (error) {
+		if (String(error).includes("未选择")) return;
+		console.error(error);
+		showFeedMessage(`OPML 导入失败：${String(error)}`);
+	}
+}
+
+async function refreshAllFeeds() {
+	if (feedBusy) return;
+	feedBusy = true;
+	showFeedMessage("正在刷新全部 Feed…");
+	try {
+		const result = await invoke("feed_refresh_all");
+		const failed = result.failed || 0;
+		showFeedMessage(
+			`新增 ${result.added} · 更新 ${result.updated} · ${failed} 个源失败`,
+		);
+		await Promise.all([refreshLibrary(true), loadFeedStatus()]);
+	} catch (error) {
+		console.error(error);
+		showFeedMessage("Feed 刷新失败");
+	} finally {
+		feedBusy = false;
+	}
+}
+
+async function refreshFeedSource(id) {
+	if (feedBusy) return;
+	feedBusy = true;
+	try {
+		const outcome = await invoke("feed_refresh_source", { id });
+		if (outcome.status === "error") {
+			showFeedMessage(`${outcome.name} 刷新失败：${outcome.error}`);
+		} else {
+			showFeedMessage(
+				`${outcome.name} · 新增 ${outcome.added} · 更新 ${outcome.updated}` +
+					(outcome.status === "unchanged" ? "（无变化）" : ""),
+			);
+		}
+		await Promise.all([refreshLibrary(true), loadFeedStatus()]);
+	} catch (error) {
+		console.error(error);
+		showFeedMessage(`刷新失败：${String(error)}`);
+	} finally {
+		feedBusy = false;
+	}
+}
+
+async function removeFeedSource(id, name) {
+	if (
+		!window.confirm(
+			`删除「${name}」？本地缓存的 RSS 资料会一并删除（批注保留）。`,
+		)
+	)
 		return;
+	try {
+		await invoke("feed_remove_source", { id });
+		showFeedMessage(`已删除「${name}」`);
+		await Promise.all([refreshLibrary(true), loadFeedStatus()]);
+	} catch (error) {
+		console.error(error);
+		showFeedMessage(`删除失败：${String(error)}`);
 	}
-	const fragment = document.createDocumentFragment();
-	for (const source of librarySources) {
-		const row = document.createElement("div");
-		row.className = `library-source${source.available ? "" : " unavailable"}`;
-		row.title = source.root;
-		const name = document.createElement("div");
-		name.className = "library-source-name";
-		const label = document.createElement("span");
-		label.textContent = source.name;
-		const count = document.createElement("span");
-		count.className = "library-source-count";
-		count.textContent = source.available
-			? `${source.documents.toLocaleString()} 篇`
-			: "目录不可用";
-		name.append(label, count);
-		const root = document.createElement("div");
-		root.className = "library-source-root";
-		root.textContent = source.root;
-		row.append(name, root);
-		fragment.appendChild(row);
-	}
-	treeEl.appendChild(fragment);
+}
+
+/// 打开 Library 平面时：超过 30 分钟未全局刷新则后台触发一次（不阻塞 UI）。
+function maybeAutoRefreshFeeds() {
+	if (feedBusy || !feedSources.length) return;
+	const now = Math.floor(Date.now() / 1000);
+	if (feedLastRefreshAt && now - feedLastRefreshAt < 30 * 60) return;
+	void refreshAllFeeds();
 }
 
 function renderLibrarySearchResults(hits) {
@@ -1529,7 +1934,10 @@ async function setSidebarMode(mode) {
 	workspaceTab.classList.toggle("active", !libraryMode && !agentMode);
 	libraryTab.classList.toggle("active", libraryMode);
 	agentTab.classList.toggle("active", agentMode);
-	workspaceTab.setAttribute("aria-selected", String(!libraryMode && !agentMode));
+	workspaceTab.setAttribute(
+		"aria-selected",
+		String(!libraryMode && !agentMode),
+	);
 	libraryTab.setAttribute("aria-selected", String(libraryMode));
 	agentTab.setAttribute("aria-selected", String(agentMode));
 	addLibrarySourceButton.hidden = !libraryMode;
@@ -1549,6 +1957,8 @@ async function setSidebarMode(mode) {
 	if (libraryMode) {
 		if (!librarySources.length) await refreshLibrary();
 		else renderLibraryHome();
+		await loadFeedStatus();
+		maybeAutoRefreshFeeds();
 	} else if (agentMode) {
 		await loadAgentWorks();
 	} else if (lastTreeNodes.length) {
@@ -1562,6 +1972,13 @@ async function useWorkspace(data) {
 	if (!data) return;
 	const workspaceChanged = !rootPath || !samePath(rootPath, data.root);
 	if (workspaceChanged) {
+		for (const [runId, waiter] of agentRunWaiters) {
+			waiter.reject(new Error("Workspace 已切换，Agent 工作未完成"));
+			agentRunWaiters.delete(runId);
+		}
+		localAgentRuns = [];
+		activeAgentRunId = null;
+		agentProbed = false;
 		citationBasket.clear();
 		renderCitationSummary();
 		clearRelated();
@@ -1584,6 +2001,7 @@ async function useWorkspace(data) {
 
 async function chooseWorkspace() {
 	try {
+		if (agentBusy) await cancelAgentTurn();
 		// Save against the current workspace before Rust switches the active root.
 		await saveCurrent();
 		if (annotateDirty) await saveAnnotate();
@@ -1605,6 +2023,7 @@ async function chooseWorkspace() {
 
 async function chooseDocument() {
 	try {
+		if (agentBusy) await cancelAgentTurn();
 		await saveCurrent();
 		if (annotateDirty) await saveAnnotate();
 		const data = await invoke("choose_document");
@@ -1636,6 +2055,7 @@ async function restoreWorkspace() {
 async function refreshTree() {
 	if (libraryMode) {
 		await refreshLibrary();
+		await loadFeedStatus();
 		return;
 	}
 	if (agentMode) {
@@ -1746,6 +2166,10 @@ function renderAgentWorks(items = allAgentWorkItems()) {
 	for (const item of items) {
 		const row = document.createElement("div");
 		row.className = `agent-work-item${item.id === currentAgentDocument?.id ? " active" : ""}`;
+		row.classList.toggle(
+			"agent-work-running",
+			Boolean(item.local && !item.terminal),
+		);
 		const open = document.createElement("button");
 		open.type = "button";
 		open.className = "agent-work-open";
@@ -1754,20 +2178,30 @@ function renderAgentWorks(items = allAgentWorkItems()) {
 		title.textContent = item.title || "Agent 工作";
 		const meta = document.createElement("span");
 		meta.className = "agent-work-meta";
-		const status = item.status || "已完成";
-		meta.textContent = `${status} · ${formatAgentTime(item.updatedAt)}`;
+		const status = item.toolStatus || item.status || "已完成";
+		meta.textContent = `${item.error ? `${status}：${item.error}` : status} · ${formatAgentTime(item.updatedAt)}`;
 		const origin = document.createElement("span");
 		origin.className = "agent-work-origin";
 		origin.textContent = item.originQuote
 			? `“${item.originQuote.slice(0, 56)}${item.originQuote.length > 56 ? "…" : ""}”`
 			: item.originUri || item.prompt || "独立 Agent 工作";
 		open.append(title, meta, origin);
+		const previewText =
+			item.preview ||
+			item.streamText ||
+			(item.error ? `错误：${item.error}` : "");
+		if (previewText) {
+			const preview = document.createElement("span");
+			preview.className = "agent-work-preview";
+			preview.textContent = previewText;
+			open.appendChild(preview);
+		}
 		open.addEventListener("click", () => {
 			if (item.local) return;
 			void openAgentWork(item);
 		});
 		row.appendChild(open);
-		if (item.local && agentBusy) {
+		if (item.local && agentBusy && !item.terminal) {
 			const stop = document.createElement("button");
 			stop.type = "button";
 			stop.className = "agent-work-stop";
@@ -1792,12 +2226,12 @@ async function loadAgentWorks() {
 		const query = searchInput.value.trim().toLocaleLowerCase();
 		const items = query
 			? allAgentWorkItems().filter((item) =>
-				[item.title, item.prompt, item.originUri, item.originQuote]
+					[item.title, item.prompt, item.originUri, item.originQuote]
 						.filter(Boolean)
 						.join("\n")
 						.toLocaleLowerCase()
 						.includes(query),
-			  )
+				)
 			: allAgentWorkItems();
 		renderAgentWorks(items);
 	} catch (error) {
@@ -1914,7 +2348,8 @@ function autosizeAnnotationEditor(textarea) {
 function renderAnnotationPanel() {
 	annotationList.replaceChildren();
 	annotateCount.textContent = String(annotationItems.length);
-	annotationEmpty.hidden = annotationItems.length > 0 || !annotateComposer.hidden;
+	annotationEmpty.hidden =
+		annotationItems.length > 0 || !annotateComposer.hidden;
 	annotateHint.textContent = annotationItems.length
 		? `${annotationItems.length} 条 · 点击原文可回到对应位置`
 		: "选择字句或把光标放在段落中，再点“新批注”";
@@ -1993,7 +2428,9 @@ function markdownQuoteToText(source) {
 }
 
 function unwrapAnnotationHighlights() {
-	previewEl.querySelectorAll(".annotation-marker").forEach((node) => node.remove());
+	previewEl
+		.querySelectorAll(".annotation-marker")
+		.forEach((node) => node.remove());
 	[...previewEl.querySelectorAll("mark.annotation-highlight")]
 		.reverse()
 		.forEach((mark) => mark.replaceWith(...mark.childNodes));
@@ -2115,10 +2552,14 @@ function focusAnnotation(id, revealSource) {
 	document.querySelectorAll("[data-annotation-id]").forEach((element) => {
 		element.classList.toggle("active", element.dataset.annotationId === id);
 	});
-	const card = annotationList.querySelector(`[data-annotation-id="${CSS.escape(id)}"]`);
+	const card = annotationList.querySelector(
+		`[data-annotation-id="${CSS.escape(id)}"]`,
+	);
 	card?.scrollIntoView({ block: "nearest", behavior: "smooth" });
 	if (!revealSource) return;
-	const marker = previewEl.querySelector(`.annotation-marker[data-annotation-id="${CSS.escape(id)}"]`);
+	const marker = previewEl.querySelector(
+		`.annotation-marker[data-annotation-id="${CSS.escape(id)}"]`,
+	);
 	if (marker) {
 		marker.scrollIntoView({ block: "center", behavior: "smooth" });
 		return;
@@ -2199,9 +2640,12 @@ function addCompletedAgentWork(document) {
 		createdAt: document.createdAt,
 		updatedAt: document.updatedAt,
 		status: document.status || "已完成",
-		threadId: document.threadId,
+		piSessionRef: document.piSessionRef || null,
 	};
-	agentWorkItems = [summary, ...agentWorkItems.filter((item) => item.id !== summary.id)];
+	agentWorkItems = [
+		summary,
+		...agentWorkItems.filter((item) => item.id !== summary.id),
+	];
 }
 
 async function submitAgentQuestion(event) {
@@ -2227,30 +2671,57 @@ async function submitAgentQuestion(event) {
 	if (agentMode) renderAgentWorks();
 	saveStateEl.textContent = "Agent 运行中…";
 	saveStateEl.classList.remove("error");
+	const completion = waitForAgentRun(run.id);
 	try {
+		await installAgentEventListener();
+		if (agentCancelRequested) throw new Error("Agent 已停止");
 		await probeAgent();
+		if (agentCancelRequested) throw new Error("Agent 已停止");
 		const citationContext = await loadCitationContext();
-		const response = await invoke("agent_turn", {
+		if (agentCancelRequested) throw new Error("Agent 已停止");
+		const response = await invoke("agent_start", {
 			input: {
+				runId: run.id,
+				title: run.title,
 				prompt: buildAgentPrompt(request, prompt, citationContext),
-				sessionId: agentSessionId,
-				messageId: globalThis.crypto?.randomUUID?.() || `msg-${Date.now()}`,
 			},
 		});
-		if (response.status === "error")
-			throw new Error(response.text || "Agent 返回错误");
-		const title = agentWorkTitle(prompt);
+		if (!response?.accepted) {
+			const error = new Error("Pi 没有接受 Agent 请求");
+			agentRunWaiters.delete(run.id);
+			throw error;
+		}
+		run.piSessionRef = response.piSessionRef || null;
+		// Cancellation can race with the setup commands inside agent_start.
+		// If the backend accepted after the first abort saw no active run, make
+		// one cleanup attempt now so that no orphaned Pi turn can continue.
+		if (agentCancelRequested) {
+			try {
+				await invoke("agent_abort");
+			} catch (error) {
+				console.warn("清理已取消的 Agent 失败", error);
+			}
+			throw new Error("Agent 已停止");
+		}
+		const terminal = await completion;
+		if (terminal.type !== "agent_settled") {
+			throw new Error(
+				terminal.message ||
+					(terminal.type === "agent_stopped"
+						? "Agent 已停止"
+						: "Agent 运行失败"),
+			);
+		}
+		if (agentCancelRequested) throw new Error("Agent 已停止");
+		const title = run.title;
 		const document = await invoke("create_agent_work", {
 			input: {
 				title,
-				content: agentDocumentContent(response.text, title),
+				content: agentDocumentContent(terminal.text, title),
 				prompt,
 				originUri: request.originUri,
 				originQuote: request.originQuote,
-				threadId: response.threadId,
-				conversationId: response.conversationId,
-				runId: response.runId,
-				receiptRef: response.receiptRef,
+				piSessionRef: terminal.piSessionRef || run.piSessionRef || null,
 			},
 		});
 		addCompletedAgentWork(document);
@@ -2259,9 +2730,11 @@ async function submitAgentQuestion(event) {
 		saveStateEl.textContent = "Agent 工作已完成";
 	} catch (error) {
 		console.error("Agent 工作失败", error);
+		agentRunWaiters.delete(run.id);
 		const local = localAgentRuns.find((item) => item.id === run.id);
 		if (local) {
 			local.status = agentCancelRequested ? "已停止" : "失败";
+			local.terminal = true;
 			local.error = String(error);
 			local.updatedAt = Math.floor(Date.now() / 1000);
 		}
@@ -2278,7 +2751,10 @@ async function submitAgentQuestion(event) {
 
 async function beginAnnotation(range = null) {
 	const target = currentDocumentRef();
-	if (!target || (target.kind === "workspace" && !isAnnotatablePath(currentFile))) {
+	if (
+		!target ||
+		(target.kind === "workspace" && !isAnnotatablePath(currentFile))
+	) {
 		annotateFoot.textContent = currentFile
 			? "批注文件本身不能再批注"
 			: "请先打开一篇文档";
@@ -2353,7 +2829,8 @@ async function loadAnnotationPanel() {
 	const loadTokenForAnnotation = ++annotationLoadToken;
 	const target = currentDocumentRef();
 	const requestedKey = documentRefKey(target);
-	const libraryDocument = target?.kind === "library" ? currentLibraryDocument : null;
+	const libraryDocument =
+		target?.kind === "library" ? currentLibraryDocument : null;
 	const agentDocument = target?.kind === "agent" ? currentAgentDocument : null;
 	if (!target) {
 		annotateDocName.textContent = "未打开文档";
@@ -2374,35 +2851,42 @@ async function loadAnnotationPanel() {
 			requestedKey !== documentRefKey()
 		)
 			return;
-		annotationItems = AnnotationCodec.parse(data.body || "", data.updated_at || "");
+		annotationItems = AnnotationCodec.parse(
+			data.body || "",
+			data.updated_at || "",
+		);
 		annotateLoadedDoc = requestedKey;
 		activeAnnotationId = null;
-		annotateDocName.textContent = target.kind === "workspace"
-			? basename(target.path).replace(/\.(md|markdown)$/i, "")
-			: target.kind === "library"
-				? data.title || libraryDocument?.title || target.relativePath
-				: data.title || agentDocument?.title || "Agent 工作";
-		annotateDocPath.textContent = target.kind === "workspace"
-			? relativeDocumentPath(target.path)
-			: target.kind === "library"
-				? data.doc_path || libraryDocument?.uri || target.relativePath
-				: data.doc_path || agentDocument?.uri || target.id;
-		annotateDocPath.title = target.kind === "workspace"
-			? target.path
-			: target.kind === "library"
-				? data.doc_path || libraryDocument?.uri || target.relativePath
-				: data.doc_path || agentDocument?.uri || target.id;
+		annotateDocName.textContent =
+			target.kind === "workspace"
+				? basename(target.path).replace(/\.(md|markdown)$/i, "")
+				: target.kind === "library"
+					? data.title || libraryDocument?.title || target.relativePath
+					: data.title || agentDocument?.title || "Agent 工作";
+		annotateDocPath.textContent =
+			target.kind === "workspace"
+				? relativeDocumentPath(target.path)
+				: target.kind === "library"
+					? data.doc_path || libraryDocument?.uri || target.relativePath
+					: data.doc_path || agentDocument?.uri || target.id;
+		annotateDocPath.title =
+			target.kind === "workspace"
+				? target.path
+				: target.kind === "library"
+					? data.doc_path || libraryDocument?.uri || target.relativePath
+					: data.doc_path || agentDocument?.uri || target.id;
 		annotateDirty = false;
 		cancelAnnotation();
 		renderAnnotationPanel();
 		renderAnnotationAnchors();
 		annotateSaveState.textContent = annotationItems.length ? "已保存" : "";
 		annotateSaveState.classList.remove("dirty", "error");
-		annotateFoot.textContent = target.kind === "workspace"
-			? "批注保存在「批注/」，随文档同步。"
-			: target.kind === "library"
-				? "资料正文只读；批注保存在 StillWrite 应用数据中。"
-				: "Agent 工作可编辑；批注保存在 StillWrite 应用数据中。";
+		annotateFoot.textContent =
+			target.kind === "workspace"
+				? "批注保存在「批注/」，随文档同步。"
+				: target.kind === "library"
+					? "资料正文只读；批注保存在 StillWrite 应用数据中。"
+					: "Agent 工作可编辑；批注保存在 StillWrite 应用数据中。";
 	} catch (error) {
 		if (
 			loadTokenForAnnotation !== annotationLoadToken ||
@@ -2416,21 +2900,24 @@ async function loadAnnotationPanel() {
 		annotateLoadedDoc = null;
 		activeAnnotationId = null;
 		cancelAnnotation();
-		annotateDocName.textContent = target.kind === "workspace"
-			? basename(target.path).replace(/\.(md|markdown)$/i, "")
-			: target.kind === "library"
-				? libraryDocument?.title || target.relativePath
-				: agentDocument?.title || "Agent 工作";
-		annotateDocPath.textContent = target.kind === "workspace"
-			? relativeDocumentPath(target.path)
-			: target.kind === "library"
-				? libraryDocument?.uri || target.relativePath
-				: agentDocument?.uri || target.id;
-		annotateDocPath.title = target.kind === "workspace"
-			? target.path
-			: target.kind === "library"
-				? libraryDocument?.uri || target.relativePath
-				: agentDocument?.uri || target.id;
+		annotateDocName.textContent =
+			target.kind === "workspace"
+				? basename(target.path).replace(/\.(md|markdown)$/i, "")
+				: target.kind === "library"
+					? libraryDocument?.title || target.relativePath
+					: agentDocument?.title || "Agent 工作";
+		annotateDocPath.textContent =
+			target.kind === "workspace"
+				? relativeDocumentPath(target.path)
+				: target.kind === "library"
+					? libraryDocument?.uri || target.relativePath
+					: agentDocument?.uri || target.id;
+		annotateDocPath.title =
+			target.kind === "workspace"
+				? target.path
+				: target.kind === "library"
+					? libraryDocument?.uri || target.relativePath
+					: agentDocument?.uri || target.id;
 		renderAnnotationPanel();
 		renderAnnotationAnchors();
 		annotateSaveState.textContent = "读取批注失败";
@@ -2498,10 +2985,7 @@ function positionSelectionActions(rect, { below = false } = {}) {
 		Math.max(8, rect.left + rect.width / 2 - width / 2),
 	);
 	const desiredTop = below ? rect.top + 12 : rect.top - height - 8;
-	const top = Math.min(
-		maxTop,
-		Math.max(8, desiredTop),
-	);
+	const top = Math.min(maxTop, Math.max(8, desiredTop));
 	selectionActions.style.left = `${left}px`;
 	selectionActions.style.top = `${top}px`;
 }
@@ -2509,7 +2993,12 @@ function positionSelectionActions(rect, { below = false } = {}) {
 function sourceRangeForPreviewSelection(quote) {
 	const exact = editor.value.indexOf(quote);
 	if (exact >= 0)
-		return { kind: "selection", start: exact, end: exact + quote.length, quote };
+		return {
+			kind: "selection",
+			start: exact,
+			end: exact + quote.length,
+			quote,
+		};
 	return { kind: "selection", start: -1, end: -1, quote };
 }
 
@@ -2556,8 +3045,7 @@ function isAnnotatablePath(path) {
 	if (!path) return false;
 	const normalized = path.replaceAll("\\", "/");
 	return !(
-		normalized.endsWith("/批注汇总.md") ||
-		normalized.includes("/批注/")
+		normalized.endsWith("/批注汇总.md") || normalized.includes("/批注/")
 	);
 }
 
@@ -2889,8 +3377,36 @@ document.querySelector("#refreshTree").addEventListener("click", refreshTree);
 workspaceTab.addEventListener("click", () => void setSidebarMode("workspace"));
 libraryTab.addEventListener("click", () => void setSidebarMode("library"));
 agentTab.addEventListener("click", () => void setSidebarMode("agent"));
-addLibrarySourceButton.addEventListener("click", addLibrarySource);
-newAgentWorkButton.addEventListener("click", () => void beginAgentQuestion(null, { allowEmpty: true }));
+addLibrarySourceButton.addEventListener("click", () => {
+	setSourceMenuOpen(sourceMenu.hidden);
+});
+addLibrarySourceMenuItem.addEventListener("click", () => {
+	setSourceMenuOpen(false);
+	void addLibrarySource();
+});
+addFeedMenuItem.addEventListener("click", () => {
+	setSourceMenuOpen(false);
+	addFeedDialog.showModal();
+	requestAnimationFrame(() => addFeedUrl.focus());
+});
+importOpmlMenuItem.addEventListener("click", () => {
+	setSourceMenuOpen(false);
+	void importOpml();
+});
+addFeedForm.addEventListener("submit", submitAddFeed);
+cancelAddFeed.addEventListener("click", () => addFeedDialog.close());
+document.addEventListener("pointerdown", (event) => {
+	if (
+		!sourceMenu.hidden &&
+		!event.target.closest("#addLibrarySource") &&
+		!sourceMenu.contains(event.target)
+	)
+		setSourceMenuOpen(false);
+});
+newAgentWorkButton.addEventListener(
+	"click",
+	() => void beginAgentQuestion(null, { allowEmpty: true }),
+);
 clearWorksetButton.addEventListener("click", () => {
 	citationBasket.clear();
 	renderCitationSummary();
@@ -2898,7 +3414,9 @@ clearWorksetButton.addEventListener("click", () => {
 });
 document.querySelector("#refreshMenu").addEventListener("click", refreshTree);
 document.querySelector("#saveDocument").addEventListener("click", saveCurrent);
-fileMenuButton.addEventListener("click", () => setFileMenuOpen(fileMenu.hidden));
+fileMenuButton.addEventListener("click", () =>
+	setFileMenuOpen(fileMenu.hidden),
+);
 fileMenu.addEventListener("click", (event) => {
 	if (event.target.closest("button")) setFileMenuOpen(false);
 });
@@ -2924,7 +3442,9 @@ relatedButton.addEventListener("click", () => {
 	setAnnotateVisible(true);
 	setSupportView("related");
 });
-annotationViewButton.addEventListener("click", () => setSupportView("annotation"));
+annotationViewButton.addEventListener("click", () =>
+	setSupportView("annotation"),
+);
 relatedViewButton.addEventListener("click", () => setSupportView("related"));
 agentAskForm.addEventListener("submit", submitAgentQuestion);
 agentAskCancel.addEventListener("click", () => {
@@ -2961,10 +3481,14 @@ annotationDraft.addEventListener("keydown", (event) => {
 		addPendingAnnotation();
 	}
 });
-previewEl.addEventListener("mouseup", () => setTimeout(showPreviewSelectionAction));
+previewEl.addEventListener("mouseup", () =>
+	setTimeout(showPreviewSelectionAction),
+);
 previewEl.addEventListener("click", (event) => {
 	const target =
-		event.target instanceof Element ? event.target : event.target?.parentElement;
+		event.target instanceof Element
+			? event.target
+			: event.target?.parentElement;
 	const anchor = target?.closest?.("a[data-document-path]");
 	if (!anchor) return;
 	event.preventDefault();
@@ -3083,4 +3607,7 @@ window.addEventListener("keydown", (event) => {
 });
 
 applyLayout();
+void installAgentEventListener().catch((error) => {
+	console.warn("Cannot subscribe to Agent events", error);
+});
 restoreWorkspace();

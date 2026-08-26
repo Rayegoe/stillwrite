@@ -9,11 +9,12 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-pub mod annotate;
-mod agent;
 mod agent_work;
+pub mod annotate;
+mod feeds;
 mod indexer;
 mod library;
+mod pi_agent;
 mod sync;
 
 #[derive(Default)]
@@ -50,7 +51,9 @@ struct OpenDocumentData {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum AnnotationTarget {
-    Workspace { path: String },
+    Workspace {
+        path: String,
+    },
     Library {
         #[serde(rename = "sourceId", alias = "source_id")]
         source_id: String,
@@ -59,7 +62,9 @@ enum AnnotationTarget {
         #[serde(rename = "contentHash", alias = "content_hash")]
         content_hash: String,
     },
-    Agent { id: String },
+    Agent {
+        id: String,
+    },
 }
 
 fn library_annotation_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -182,7 +187,7 @@ fn resolve_index_db(app: &AppHandle, root: &Path) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|e| format!("无法定位应用数据目录: {e}"))?;
     let key = short_hash(root.to_string_lossy().as_bytes());
-    let sub = dir.join("workspaces").join(format!("{key}"));
+    let sub = dir.join("workspaces").join(&key);
     fs::create_dir_all(&sub).map_err(|e| format!("创建索引目录失败: {e}"))?;
     Ok(sub.join("index.db"))
 }
@@ -218,12 +223,14 @@ fn activate_workspace(
     root: PathBuf,
     app: &AppHandle,
     state: &State<AppState>,
+    process: &pi_agent::PiProcessState,
 ) -> Result<WorkspaceData, String> {
     let root = fs::canonicalize(root).map_err(|e| format!("打开目录失败: {e}"))?;
     if !root.is_dir() {
         return Err("选择的路径不是目录".into());
     }
     validate_workspace_root(&root)?;
+    process.shutdown_for_workspace(&root);
 
     let nodes = scan_dir(&root)?;
     {
@@ -264,7 +271,10 @@ fn workspace_root(state: &State<AppState>) -> Result<PathBuf, String> {
         .ok_or_else(|| "尚未打开工作区".to_string())
 }
 
-fn ensure_existing_path_inside_workspace(path: &str, state: &State<AppState>) -> Result<PathBuf, String> {
+fn ensure_existing_path_inside_workspace(
+    path: &str,
+    state: &State<AppState>,
+) -> Result<PathBuf, String> {
     let root = workspace_root(state)?;
     let canonical = fs::canonicalize(path).map_err(|e| format!("路径不可用: {e}"))?;
     if !canonical.starts_with(&root) {
@@ -274,7 +284,11 @@ fn ensure_existing_path_inside_workspace(path: &str, state: &State<AppState>) ->
 }
 
 #[tauri::command]
-async fn choose_workspace(app: AppHandle, state: State<'_, AppState>) -> Result<Option<WorkspaceData>, String> {
+async fn choose_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    process: State<'_, pi_agent::PiProcessState>,
+) -> Result<Option<WorkspaceData>, String> {
     let selected = app
         .dialog()
         .file()
@@ -287,13 +301,14 @@ async fn choose_workspace(app: AppHandle, state: State<'_, AppState>) -> Result<
     let path = selected
         .into_path()
         .map_err(|e| format!("目录路径不可用: {e}"))?;
-    activate_workspace(path, &app, &state).map(Some)
+    activate_workspace(path, &app, &state, &process).map(Some)
 }
 
 #[tauri::command]
 async fn choose_document(
     app: AppHandle,
     state: State<'_, AppState>,
+    process: State<'_, pi_agent::PiProcessState>,
 ) -> Result<Option<OpenDocumentData>, String> {
     let selected = app
         .dialog()
@@ -318,7 +333,7 @@ async fn choose_document(
         .filter(|root| path.starts_with(root))
         .or_else(|| path.parent().map(Path::to_path_buf))
         .ok_or_else(|| "无法确定文档所在文件夹".to_string())?;
-    let WorkspaceData { root, nodes } = activate_workspace(root, &app, &state)?;
+    let WorkspaceData { root, nodes } = activate_workspace(root, &app, &state, &process)?;
     let content = fs::read_to_string(&path).map_err(|e| format!("读取文档失败: {e}"))?;
     let name = path
         .file_name()
@@ -339,8 +354,9 @@ async fn set_workspace(
     app: AppHandle,
     path: String,
     state: State<'_, AppState>,
+    process: State<'_, pi_agent::PiProcessState>,
 ) -> Result<WorkspaceData, String> {
-    activate_workspace(PathBuf::from(path), &app, &state)
+    activate_workspace(PathBuf::from(path), &app, &state, &process)
 }
 
 #[tauri::command]
@@ -387,8 +403,8 @@ pub(crate) fn create_dir_all_inside(root: &Path, dir: &Path) -> Result<(), Strin
         match fs::symlink_metadata(&cursor) {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
-                    let resolved = fs::canonicalize(&cursor)
-                        .map_err(|e| format!("创建目录失败: {e}"))?;
+                    let resolved =
+                        fs::canonicalize(&cursor).map_err(|e| format!("创建目录失败: {e}"))?;
                     if !resolved.starts_with(root) {
                         return Err("拒绝访问工作区以外的路径".into());
                     }
@@ -465,14 +481,21 @@ fn create_new_markdown(root: &Path, rel: &Path) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-async fn write_markdown(app: AppHandle, path: String, content: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn write_markdown(
+    app: AppHandle,
+    path: String,
+    content: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let path = ensure_existing_path_inside_workspace(&path, &state)?;
     if !is_markdown(&path) {
         return Err("只允许写入 Markdown 文件".into());
     }
     atomic_write(&path, &content)?;
     // 保存后增量更新索引
-    let _ = with_index(&app, &state, |conn, root| indexer::index_single(conn, root, &path));
+    let _ = with_index(&app, &state, |conn, root| {
+        indexer::index_single(conn, root, &path)
+    });
     Ok(())
 }
 
@@ -484,7 +507,9 @@ async fn create_markdown(
 ) -> Result<String, String> {
     let root = workspace_root(&state)?;
     let target = create_new_markdown(&root, Path::new(&relative_path))?;
-    let _ = with_index(&app, &state, |conn, root| indexer::index_single(conn, root, &target));
+    let _ = with_index(&app, &state, |conn, root| {
+        indexer::index_single(conn, root, &target)
+    });
     Ok(target.to_string_lossy().to_string())
 }
 
@@ -493,7 +518,7 @@ async fn rebuild_index(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(usize, usize), String> {
-    with_index(&app, &state, |conn, root| indexer::build_index(conn, root))
+    with_index(&app, &state, indexer::build_index)
 }
 
 #[tauri::command]
@@ -599,6 +624,99 @@ async fn read_library_document(
     })
     .await
     .map_err(|e| format!("读取资料任务异常: {e}"))?
+}
+
+/// 列出某个 Library source 的最近文档（通用；RSS“最近 RSS”复用此路径）。
+#[tauri::command]
+async fn list_library_source_documents(
+    app: AppHandle,
+    source_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<library::LibraryDocumentMeta>, String> {
+    let db_path = library::resolve_index_db(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        library::list_source_documents(&db_path, &source_id, limit.unwrap_or(20))
+    })
+    .await
+    .map_err(|e| format!("资料列表任务异常: {e}"))?
+}
+
+// ---------------------------------------------------------------------------
+// RSS / Atom Source Adapter 命令面（feeds.rs）
+// 网络抓取只发生在 Rust 后端；UI 不接触任何 feed URL 的网络请求。
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn feed_list_sources(app: AppHandle) -> Result<Vec<feeds::FeedSourceView>, String> {
+    feeds::list_sources(&app)
+}
+
+/// 添加 RSS/Atom 源：立即保存订阅（首抓失败也保留），后台抓取首轮内容。
+#[tauri::command]
+async fn feed_add_source(
+    app: AppHandle,
+    url: String,
+    name: Option<String>,
+) -> Result<feeds::FeedSourceView, String> {
+    feeds::add_source(&app, &url, name.as_deref())
+}
+
+/// 删除源：同时删除 RSS/<id>/ 派生缓存，保留批注；随后刷新 Library 索引。
+#[tauri::command]
+async fn feed_remove_source(app: AppHandle, id: String) -> Result<(), String> {
+    feeds::remove_source(&app, &id)
+}
+
+/// 导入 OPML（未传 path 时弹文件选择框）；merge 语义，坏 URL 不取消其他项。
+#[tauri::command]
+async fn feed_import_opml(
+    app: AppHandle,
+    path: Option<String>,
+) -> Result<feeds::OpmlImportResult, String> {
+    let path = match path {
+        Some(path) => Some(PathBuf::from(path)),
+        None => {
+            let selected = app
+                .dialog()
+                .file()
+                .set_title("选择 OPML 文件")
+                .add_filter("OPML", &["opml", "xml"])
+                .blocking_pick_file();
+            let Some(selected) = selected else {
+                return Err("未选择 OPML 文件".into());
+            };
+            let path = selected
+                .into_path()
+                .map_err(|e| format!("OPML 文件路径不可用: {e}"))?;
+            Some(path)
+        }
+    };
+    feeds::import_opml(&app, path.as_deref())
+}
+
+#[tauri::command]
+async fn feed_refresh_source(
+    app: AppHandle,
+    id: String,
+) -> Result<feeds::FeedRefreshOutcome, String> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || feeds::refresh_source(&app, &id))
+        .await
+        .map_err(|e| format!("Feed 刷新任务异常: {e}"))?
+}
+
+#[tauri::command]
+async fn feed_refresh_all(app: AppHandle) -> Result<feeds::FeedRefreshResult, String> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || feeds::refresh_all(&app))
+        .await
+        .map_err(|e| format!("Feed 刷新任务异常: {e}"))?
+}
+
+/// 源列表 + RSS Library source 视图 + 最近 RSS 资料。
+#[tauri::command]
+async fn feed_status(app: AppHandle) -> Result<feeds::FeedStatus, String> {
+    feeds::status(&app)
 }
 
 /// 列出当前 Workspace 对应的 Agent 工作文档。
@@ -770,7 +888,7 @@ async fn sync_workspace(
 
     let status = sync::sync_workspace(&root, remote_hint, &remote_name)?;
     // 同步后重建索引（增量，吸收远端变更）
-    let _ = with_index(&app, &state, |conn, root| indexer::build_index(conn, root));
+    let _ = with_index(&app, &state, indexer::build_index);
     Ok(status)
 }
 
@@ -778,7 +896,7 @@ async fn sync_workspace(
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .manage(agent::AgentProcessState::default())
+        .manage(pi_agent::PiProcessState::default())
         .setup(|app| {
             let lock_path = app.path().app_data_dir()?.join("stillwrite.lock");
             match try_acquire_instance_lock(&lock_path)? {
@@ -809,6 +927,14 @@ pub fn run() {
             search_library,
             search_related_library,
             read_library_document,
+            list_library_source_documents,
+            feed_list_sources,
+            feed_add_source,
+            feed_remove_source,
+            feed_import_opml,
+            feed_refresh_source,
+            feed_refresh_all,
+            feed_status,
             list_agent_works,
             read_agent_work,
             create_agent_work,
@@ -817,9 +943,9 @@ pub fn run() {
             save_annotation,
             aggregate_annotations,
             sync_workspace,
-            agent::agent_probe,
-            agent::agent_turn,
-            agent::agent_cancel
+            pi_agent::agent_probe,
+            pi_agent::agent_start,
+            pi_agent::agent_abort
         ])
         .run(tauri::generate_context!())
         .expect("error while running Stillwrite");
@@ -830,8 +956,8 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("stillwrite-test-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("stillwrite-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

@@ -25,6 +25,14 @@ sha2 = "0.10"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 libc = "0.2"
 
+# RSS / Atom source adapter (feeds.rs)：http 抓取、feed 解析、HTML→Markdown、OPML。
+feed-rs = "2.4"
+reqwest = { version = "0.13", features = ["blocking", "gzip"] }
+html2md = "0.2.17"
+roxmltree = "0.20"
+url = "2"
+chrono = "0.4"
+
 # Keep local builds compact. Full debug info and Cargo's incremental cache were
 # responsible for most of the multi-gigabyte target directory.
 [profile.dev]
@@ -35,11 +43,12 @@ incremental = false
 debug = 0
 incremental = false
 
-# The distributed binary does not need symbols or unwinding metadata. Thin LTO
-# gives most of the size benefit without the very slow link of full LTO.
+# The distributed binary does not need symbols. Thin LTO gives most of the size
+# benefit without the very slow link of full LTO. html2md 0.2.17 requires the
+# unwind panic runtime when linked by Rust 1.98.
 [profile.release]
 codegen-units = 1
 lto = "thin"
 opt-level = "s"
-panic = "abort"
+panic = "unwind"
 strip = true

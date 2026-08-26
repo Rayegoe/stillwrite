@@ -88,7 +88,7 @@ Library 是 Workspace 之外的只读资料层，不是 RSS 阅读器，也不�
 - 发送 Agent 请求时，StillWrite 才读取当前引用篮中的资料正文，并把它们作为有边界的只读引用传入；勾选原文不会自动携带批注。
 - 刷新会清理已删除文件的索引；SQLite 可直接删除，下一次刷新会从资料源重建。
 
-Library 的目标边界是：`Library ≠ Workspace`、`Index ≠ Content`。引用篮是当前会话内的临时选择，不是持久化对象；发送时读取当前资料正文。当前版本暂不包含 RSS 网络抓取、Embedding、标签、自动分类和摘要。
+Library 的目标边界是：`Library ≠ Workspace`、`Index ≠ Content`。引用篮是当前会话内的临时选择，不是持久化对象；发送时读取当前资料正文。当前版本暂不包含 Embedding、标签、自动分类和摘要；RSS 网络抓取见下方 v0.7 小节。
 
 ## v0.5 原型：Agent Work / Agent 工作
 
@@ -97,19 +97,22 @@ Agent 不是右侧常驻聊天框，而是由文档选区触发、最终落成 M
 - 侧栏现在有 `文件 / 资料 / Agent` 三个平面；`Agent` 列表只显示工作标题、来源选区和运行状态，不把 Workspace 文件树或 Library 展开成第二棵目录树。
 - 在阅读区选中文字后，浮层会同时提供 `＋批注` 与 `问 Agent`。工具栏里的 `问 Agent` 也可围绕当前段落发起请求；`Agent` 侧栏的 `＋` 用于新建独立工作。
 - Agent 结果保存为当前 Workspace 对应的独立 Markdown 工作文档，正文在 StillWrite 应用数据目录，不进入 Workspace 文件树、git 或 Library。打开后与其他文档共用同一个编辑器、阅读区、选区、高亮和批注系统。
-- Agent 工作的来源选区、请求和运行标识只保存在最小 JSON 侧车；正文仍是 Markdown。工作运行时列表显示状态，完成后用户点击列表项再打开结果，不打断当前写作。
-- 当前 Agent backend 仍通过本地 `zuaef-agent` 的 `stillwrite` surface 发起一次自然语言 turn，返回文本、会话/运行标识和 receipt；停止按钮只停止当前本地进程，不宣称撤销已经发生的外部效果。
+- Agent 工作的来源选区、请求和 Pi session 相对引用只保存在最小 JSON 侧车；正文仍是 Markdown。工作运行时列表显示状态，完成后用户点击列表项再打开结果，不打断当前写作。
+- StillWrite 通过本机 Pi 的 `--mode rpc` 持久进程运行 Agent；一个 Workspace 对应一个 Pi 进程和独立 session 目录。流式预览只留在 Agent 列表，只有收到权威最终文本后才保存一次 Agent Work。
+- Pi 只能通过 StillWrite 显式加载的 `workspace_list`、`workspace_read`、`workspace_search` 三个只读工具访问当前 Workspace；它没有 shell、编辑或写文件工具。当前源文档不会被 Pi 修改。
 
-启动器按以下顺序发现：
+安装 Pi（也可以使用已安装的 standalone `pi` 可执行文件）：
 
-1. `STILLWRITE_ZUAEF_EXECUTABLE`：明确的可执行文件路径；
-2. `PATH` 中的 `zuaef-agent`；
-3. `STILLWRITE_ZUAEF_PROJECT_ROOT` 配合 `uv run --project … zuaef-agent`。
+```bash
+npm install -g @mariozechner/pi-coding-agent
+pi --version
+```
 
-若 Agent 使用独立配置目录，可再设置 `STILLWRITE_ZUAEF_CONFIG_ROOT`。被调用的
-CLI 需要提供 `profile check ace-writing` 和
-`gateway turn --surface stillwrite --profile ace-writing`，请求/响应使用单行 JSON
-并校验 workspace、tenant、user、thread 的 routing identity。
+provider、模型和认证在 Pi 外部配置，StillWrite 不保存凭据。必要时可以设置以下环境变量：
+
+- `STILLWRITE_PI_EXECUTABLE`：明确的 Pi 可执行文件路径；否则按 `PATH` 中的 `pi` 查找。
+- `STILLWRITE_PI_AGENT_DIR`：Pi 的独立配置目录。
+- `STILLWRITE_PI_PROVIDER`、`STILLWRITE_PI_MODEL`、`STILLWRITE_PI_THINKING`：可选的启动参数覆盖。
 
 ## v0.6 原型：Ambient Related / 关联
 
@@ -122,6 +125,18 @@ CLI 需要提供 `profile check ace-writing` 和
 - 每张关联卡片都可以在 `引用` 旁点击 `☆ 固定`；固定卡片会保存到本机、优先显示，并且不受关联结果 Top 5 限制。固定状态按 Workspace 保存，不写入 Markdown 或 git。
 - 关联只使用本地搜索和现有 Markdown / 索引，不调用模型、不访问网络、不自动写入文档；除用户主动固定的卡片状态外，不产生持久化关系数据。
 - Library 结果可以由用户显式加入当前 `引用`；关联本身不会自动加入引用篮。查看 Library 或 Agent Work 时，关联结果会清空。
+
+## v0.7 原型：RSS / Atom 作为资料源（本分支新增）
+
+RSS 只是一个 **Library 输入适配器**，不是第四个顶层平面，也不是新阅读器：
+
+- `资料 → ＋ → 添加 RSS` 粘贴一个 RSS / Atom URL，或 `导入 OPML` 批量导入（`*.opml / *.xml`，merge 语义：已存在 URL 跳过，坏项不影响其他项）。每个源只有 `刷新` 与 `删除` 两个操作，不做已读/未读、文件夹、标签或推荐。
+- 抓取发生在 Rust 后端（`feeds.rs`）：ETag / Last-Modified 条件请求、连接与读取超时、最多 5 次重定向、5 MiB 响应体上限、明确的 User-Agent。刷新全部源时最多 4 路并发，单个源失败不会阻塞其他源。
+- 条目物化为本地 Markdown：`<AppData>/library/RSS/<feed-id>/<YYYY-MM-DD>__<标题>__<短id>.md`。内容优先使用 Feed 自带全文；只有摘要时保存摘要并标注原文链接，不伪装成全文。Feed 正文是 HTML 时由成熟 `html2md` 转换；script / style / iframe 等可执行内容不进入 Markdown。enclosure 只保留为普通链接，不下载。
+- 物化目录作为普通 Library source 注册（名为 `RSS`），随后走现有 Library 索引 / 搜索 / 只读阅读 / 批注 / 引用篮 / Ask Agent / 关联。`最近 RSS` 直接读现有 `library_documents`，不建第二套全文库或批注库。
+- `rss-sources.json` 只保存用户订阅（id / name / url）；ETag、上次抓取时间、错误等派生状态在 `rss-fetch-state.json`，删除后只导致下一次完整抓取，不丢订阅。删除源会删除本地 Markdown 缓存并刷新索引，但**保留**已有批注。
+- 手动刷新是主路径；打开 `资料` 面板时若距上次全局刷新超过 30 分钟，会在后台静默触发一次。
+- **不做**：网页全文抓取 / headless browser、EPUB / Kindle 导出、已读未读、定时 daemon、RSS 专属数据库、RSS 专属批注或 Agent 管线。summary-only feed 的影响留待真实使用数据再决定是否引入正文提取。
 
 ## 为什么不是单 HTML `file://`
 
@@ -219,16 +234,20 @@ stillwrite/
 │   ├── annotations.test.js # 批注格式与锚点单元测试
 │   ├── document-links.js # URL 与项目内 Markdown 名称/路径识别和跳转
 │   ├── document-links.test.js # 内外链接识别与相对路径解析测试
+│   ├── agent-events.js # Agent 流式事件归约（运行态，不落盘）
+│   ├── agent-events.test.js # Agent 事件归约测试
 │   ├── app.js          # 文件树、Library、搜索、关联、引用篮、同步、预览、布局、批注
 │   └── style.css       # 沉浸式双栏视觉 + 批注栏 + 资料库
 └── src-tauri/
     ├── src/lib.rs      # 文件夹/文档选择 + 工作区边界 + 文件读写 + Tauri command 注册
     ├── src/annotate.rs # 批注侧车：读写 `批注/`（标注来源/时间）+ 汇总 `批注汇总.md`
-    ├── src/agent.rs    # Agent backend：本地 launcher、stillwrite surface、取消与 receipt 校验
+    ├── src/pi_agent.rs # Pi launcher、持久 JSONL RPC、流式事件、取消与 Workspace 生命周期
     ├── src/agent_work.rs # Agent Markdown 工作文档与来源/运行侧车
     ├── src/indexer.rs  # SQLite FTS5 侧车索引（rusqlite bundled）
     ├── src/library.rs   # 外部 Markdown 资料源、增量索引、SHA-256 去重、只读读取
+    ├── src/feeds.rs    # RSS/Atom 源：抓取 + 解析 + 物化 Markdown + OPML 导入 + 单测
     ├── src/sync.rs     # git 同步引擎（最后写入者胜 + 单测 + 板子集成测试）
+    ├── resources/pi/  # StillWrite system prompt 与只读 Workspace 工具扩展
     ├── capabilities/   # 最小 IPC 权限
     └── tauri.conf.json # 直接把 ../ui 嵌入桌面应用
 ```
@@ -238,6 +257,7 @@ stillwrite/
 ```bash
 node ui/annotations.test.js # 结构化批注前端单元测试
 node ui/document-links.test.js # 项目内文档链接与 URL 单元测试
+node ui/agent-events.test.js # Agent 流式事件归约与结束状态测试
 cd src-tauri
 cargo test                # 默认单测与批注流程测试；另有 2 个按需调试/网络测试
 cargo test -- --ignored live   # 需要配置的远程设备在线：真实跨设备推送/拉取/冲突收敛
@@ -260,6 +280,6 @@ cargo test -- --ignored live   # 需要配置的远程设备在线：真实跨�
 
 ## 当前刻意不做
 
-AI 写作、云同步（远程托管）、数据库内容存储、标签、插件系统、富文本、复杂设置页、本地图片代理。
+云同步（远程托管）、数据库内容存储、标签、插件系统、富文本、复杂设置页、本地图片代理。
 
 > 注意：v0.2 原型新增的 SQLite 索引与 git 同步属于本分支实验内容；索引可随时删除重建，同步可随时通过 `git remote remove origin` 解除。

@@ -2,9 +2,9 @@
 //! 模拟前端完整调用序列（read_annotation → save_annotation → aggregate_annotations），
 //! 覆盖拆解章节文档、子目录文档、无标题散记。
 
-use stillwrite_lib::annotate::{self, ANNOTATE_DIR, AGGREGATE_NAME};
 use std::fs;
 use std::path::PathBuf;
+use stillwrite_lib::annotate::{self, AGGREGATE_NAME, ANNOTATE_DIR};
 
 fn tmp_workspace(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sw-e2e-{name}-{}", std::process::id()));
@@ -30,11 +30,23 @@ fn full_annotation_flow_any_doc() {
     for rel in ["ch01-llm-wiki-是什么.md", "笔记/随手记.md"] {
         let data = annotate::read_annotation_data(&root, &root.join(rel)).unwrap();
         assert_eq!(data.body, "", "{rel} 初始应为空批注");
-        assert_eq!(data.title, if rel.contains('/') { "随手记" } else { "ch01-llm-wiki-是什么" });
+        assert_eq!(
+            data.title,
+            if rel.contains('/') {
+                "随手记"
+            } else {
+                "ch01-llm-wiki-是什么"
+            }
+        );
     }
 
     // 2. 写批注（不按章节，整篇一篇）
-    annotate::save_annotation(&root, &root.join("ch01-llm-wiki-是什么.md"), "wiki 把知识编译一次，比 RAG 每次现查更省。").unwrap();
+    annotate::save_annotation(
+        &root,
+        &root.join("ch01-llm-wiki-是什么.md"),
+        "wiki 把知识编译一次，比 RAG 每次现查更省。",
+    )
+    .unwrap();
     annotate::save_annotation(&root, &root.join("笔记/随手记.md"), "这段想法值得展开。").unwrap();
 
     // 3. 侧车按原文路径镜像 + 元信息标注来源和时间
@@ -43,17 +55,25 @@ fn full_annotation_flow_any_doc() {
     let content = fs::read_to_string(&sidecar).unwrap();
     assert!(content.contains("> 来源：`ch01-llm-wiki-是什么.md`"));
     assert!(content.contains("> 时间：20"), "侧车应标注时间: {content}");
-    assert!(root.join(ANNOTATE_DIR).join("笔记").join("随手记.md").is_file());
+    assert!(root
+        .join(ANNOTATE_DIR)
+        .join("笔记")
+        .join("随手记.md")
+        .is_file());
 
     // 4. 读取回来
-    let data = annotate::read_annotation_data(&root, &root.join("ch01-llm-wiki-是什么.md")).unwrap();
+    let data =
+        annotate::read_annotation_data(&root, &root.join("ch01-llm-wiki-是什么.md")).unwrap();
     assert_eq!(data.body, "wiki 把知识编译一次，比 RAG 每次现查更省。");
     assert!(!data.updated_at.is_empty());
 
     // 5. 汇总 → 批注汇总.md 在工作区根目录
     let result = annotate::aggregate(&root).unwrap();
     assert_eq!(result.count, 2);
-    assert_eq!(result.path, root.join(AGGREGATE_NAME).to_string_lossy().to_string());
+    assert_eq!(
+        result.path,
+        root.join(AGGREGATE_NAME).to_string_lossy().to_string()
+    );
 
     let aggregate_md = fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap();
     assert!(aggregate_md.contains("## ch01-llm-wiki-是什么"));
@@ -65,11 +85,21 @@ fn full_annotation_flow_any_doc() {
     // 6. 幂等：汇总文件自身不被当作源文档
     let again = annotate::aggregate(&root).unwrap();
     assert_eq!(again.count, 2);
-    assert_eq!(fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap(), aggregate_md);
+    assert_eq!(
+        fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap(),
+        aggregate_md
+    );
 
     // 7. 清空一篇批注后重汇总 → 只剩一篇；侧车被删除
     annotate::save_annotation(&root, &root.join("笔记/随手记.md"), "  ").unwrap();
-    assert!(!root.join(ANNOTATE_DIR).join("笔记").join("随手记.md").exists(), "空正文应删除侧车");
+    assert!(
+        !root
+            .join(ANNOTATE_DIR)
+            .join("笔记")
+            .join("随手记.md")
+            .exists(),
+        "空正文应删除侧车"
+    );
     let after_clear = annotate::aggregate(&root).unwrap();
     assert_eq!(after_clear.count, 1);
     let md2 = fs::read_to_string(root.join(AGGREGATE_NAME)).unwrap();
