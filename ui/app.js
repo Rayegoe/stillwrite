@@ -155,7 +155,7 @@ let sidebarVisible =
 let viewMode = localStorage.getItem("stillwrite.viewMode") || "split";
 // 写|双|读 document-local（M3）：每个文档记住自己的视图模式，
 // localStorage 只存展示偏好（AGENTS §2.1 允许），默认回退 split。
-let viewModesByDocument = (() => {
+const viewModesByDocument = (() => {
 	try {
 		const parsed = JSON.parse(
 			localStorage.getItem("stillwrite.viewModes") || "{}",
@@ -2517,6 +2517,19 @@ function renderWorkRow(record) {
 	open.append(head, meta);
 	open.addEventListener("click", () => void openWorkDetail(record));
 	item.appendChild(open);
+	if (row.artifact?.id) {
+		const artifact = document.createElement("button");
+		artifact.type = "button";
+		artifact.className = "text-btn work-row-artifact";
+		artifact.textContent =
+			row.status === "needs_human" ? "成果待验收" : "查看成果";
+		artifact.title = row.artifact.uri;
+		artifact.addEventListener("click", (event) => {
+			event.stopPropagation();
+			void openWorkArtifact(row.artifact.id);
+		});
+		item.appendChild(artifact);
+	}
 	return item;
 }
 
@@ -2621,8 +2634,8 @@ function renderWorkDetailView() {
 		const accept = document.createElement("button");
 		accept.type = "button";
 		accept.className = "primary-btn";
-		accept.textContent = "接受完成";
-		accept.title = "人工明确接受后工作才算 completed";
+		accept.textContent = "验收完成";
+		accept.title = "先查看成果文档，确认后再验收；完成只来自你的明确接受";
 		accept.addEventListener("click", () => void acceptWork(record.id));
 		actions.appendChild(accept);
 	}

@@ -2012,6 +2012,11 @@ kbd {
 .work-item .agent-work-open {
 	gap: 2px;
 }
+.work-row-artifact {
+	align-self: center;
+	flex: 0 0 auto;
+	margin-right: 6px;
+}
 .work-row-head {
 	display: flex;
 	align-items: baseline;

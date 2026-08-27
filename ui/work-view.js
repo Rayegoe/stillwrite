@@ -73,6 +73,9 @@
 			updatedAt: record.updatedAt,
 			relativeTime: relativeTime(record.updatedAt, now),
 			artifactUri: record.artifactUri || null,
+			artifact: record.artifactUri
+				? { uri: record.artifactUri, id: artifactWorkId(record.artifactUri) }
+				: null,
 		};
 	}
 

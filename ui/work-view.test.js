@@ -149,6 +149,25 @@ test("detailModel stays renderable without events or artifact", () => {
 	assert.equal(detail.title, "未命名工作");
 });
 
+test("rowModel exposes artifact for in-row shortcut", () => {
+	const row = WorkView.rowModel({
+		id: "w1",
+		title: "t",
+		status: "needs_human",
+		artifactUri: "agentwork://abc123/work-1",
+		updatedAt: "2026-08-28T00:00:00Z",
+	});
+	assert.deepEqual(row.artifact, { uri: "agentwork://abc123/work-1", id: "work-1" });
+	const none = WorkView.rowModel({
+		id: "w2",
+		title: "t",
+		status: "queued",
+		artifactUri: null,
+		updatedAt: "2026-08-28T00:00:00Z",
+	});
+	assert.equal(none.artifact, null);
+});
+
 test("artifactWorkId parses canonical agentwork URIs only", () => {
 	assert.equal(WorkView.artifactWorkId("agentwork://key/work-1"), "work-1");
 	assert.equal(WorkView.artifactWorkId("agent://key/work-1"), null);
