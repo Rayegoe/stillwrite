@@ -24,6 +24,9 @@ pub struct CreateAgentWorkInput {
     pub origin_uri: Option<String>,
     pub origin_quote: Option<String>,
     pub pi_session_ref: Option<String>,
+    /// 关联的运行收据 run id（AppData/agent/runs/<run-id>.jsonl）。
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

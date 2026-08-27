@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     ffi::OsString,
     fs,
@@ -19,7 +19,7 @@ use std::{
         mpsc, Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -359,11 +359,12 @@ impl ChildProcess {
                     .or_else(|| object.get("message").map(short_value))
                     .unwrap_or_else(|| "StillWrite Pi extension failed".into());
                 if self.take_run(&run.run_id).is_some() {
-                    self.emit_run_event(
-                        &run.run_id,
-                        "error",
-                        [("message".into(), Value::String(message))],
-                    );
+                    let mut fields = vec![("message".into(), Value::String(message))];
+                    let tail = stderr_tail(self);
+                    if !tail.is_empty() {
+                        fields.push(("stderr".into(), Value::String(tail)));
+                    }
+                    self.emit_run_event(&run.run_id, "error", fields);
                 }
             }
             "agent_settled" => {
@@ -401,23 +402,48 @@ impl ChildProcess {
             // A user may have aborted while the final-text request was in flight.
             return;
         }
+        let result = match result {
+            Ok(text) => {
+                // 首个 assistant response 已产生，session 文件此刻应已落盘；
+                // 重新解析拿到权威引用，失败则退回启动时记录的逻辑引用。
+                let verified = self
+                    .request(json!({ "type": "get_state" }), COMMAND_TIMEOUT)
+                    .ok()
+                    .filter(|response| response.success)
+                    .map(|response| {
+                        session_ref_from_state(
+                            &self.inner.session_root,
+                            &response.data.unwrap_or(Value::Null),
+                        )
+                    })
+                    .and_then(|parsed| parsed.ok())
+                    .flatten();
+                let session_ref = verified.or(run.session_ref.clone());
+                Ok((text, session_ref))
+            }
+            Err(error) => Err(error),
+        };
         match result {
-            Ok(text) => self.emit_run_event(
+            Ok((text, session_ref)) => self.emit_run_event(
                 &run.run_id,
                 "agent_settled",
                 [
                     ("text".into(), Value::String(text)),
                     (
                         "piSessionRef".into(),
-                        run.session_ref.map(Value::String).unwrap_or(Value::Null),
+                        session_ref.map(Value::String).unwrap_or(Value::Null),
                     ),
                 ],
             ),
-            Err(error) => self.emit_run_event(
-                &run.run_id,
-                "error",
-                [("message".into(), Value::String(short_error(&error)))],
-            ),
+            Err(error) => {
+                let mut fields: Vec<(String, Value)> =
+                    vec![("message".into(), Value::String(short_error(&error)))];
+                let tail = stderr_tail(self);
+                if !tail.is_empty() {
+                    fields.push(("stderr".into(), Value::String(tail)));
+                }
+                self.emit_run_event(&run.run_id, "error", fields);
+            }
         }
     }
 
@@ -567,11 +593,75 @@ impl PiProcessState {
 
 fn tauri_event_sink(app: &AppHandle) -> EventSink {
     let app = app.clone();
+    let streaming_runs: Arc<Mutex<HashSet<String>>> = Arc::default();
     Arc::new(move |event| {
+        journal_pipeline_event(&app, &streaming_runs, &event);
         if let Err(error) = app.emit("agent-event", event) {
             eprintln!("发送 Agent 事件失败: {error}");
         }
     })
+}
+
+/// 把 Pi 运行期事件映射为状态链，逐条追加进该 run 的持久化收据。
+/// 收据写入是尽力而为的：失败只影响可观测性，不影响运行本身。
+fn journal_pipeline_event(app: &AppHandle, streaming_runs: &Mutex<HashSet<String>>, event: &Value) {
+    let Some(object) = event.as_object() else {
+        return;
+    };
+    let Some(run_id) = object.get("runId").and_then(Value::as_str) else {
+        return;
+    };
+    let event_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut fields = serde_json::Map::new();
+    fields.insert("event".into(), Value::String(event_type.into()));
+    match event_type {
+        "agent_start" => {
+            fields.insert("stage".into(), json!("MODEL_RUNNING"));
+        }
+        // 每个 delta 都写文件会把收据撑爆；只在首个文本增量落 STREAMING。
+        "message_update" => {
+            if !object.contains_key("delta") {
+                return;
+            }
+            let first = streaming_runs
+                .lock()
+                .map(|mut seen| seen.insert(run_id.to_string()))
+                .unwrap_or(false);
+            if !first {
+                return;
+            }
+            fields.insert("stage".into(), json!("STREAMING"));
+        }
+        "tool_execution_start" | "tool_execution_end" => {
+            if let Some(tool_name) = object.get("toolName").and_then(Value::as_str) {
+                fields.insert("toolName".into(), json!(tool_name));
+            }
+        }
+        "compaction_start" | "compaction_end" => {}
+        "agent_settled" => {
+            fields.insert("stage".into(), json!("SETTLED"));
+            if let Some(text) = object.get("text").and_then(Value::as_str) {
+                fields.insert("textLength".into(), json!(text.chars().count()));
+            }
+            if let Some(session_ref) = object.get("piSessionRef").and_then(Value::as_str) {
+                fields.insert("piSessionRef".into(), json!(session_ref));
+            }
+        }
+        "agent_stopped" => {
+            fields.insert("stage".into(), json!("STOPPED"));
+        }
+        "error" => {
+            fields.insert("stage".into(), json!("FAILED"));
+            if let Some(message) = object.get("message") {
+                fields.insert("error".into(), message.clone());
+            }
+        }
+        _ => return,
+    }
+    append_run_receipt(app, run_id, Value::Object(fields));
 }
 
 fn emit_direct_event(
@@ -584,6 +674,99 @@ fn emit_direct_event(
         .map(|message| vec![("message".into(), Value::String(message))])
         .unwrap_or_default();
     process.emit_run_event(run_id, event_type, fields);
+}
+
+const RECEIPT_STDERR_TAIL_CHARS: usize = 1024;
+const RECEIPT_MAX_RUNS: usize = 50;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartStage {
+    StartingPi,
+    PiReady,
+    SessionAllocated,
+    PromptSent,
+}
+
+impl StartStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::StartingPi => "STARTING_PI",
+            Self::PiReady => "PI_READY",
+            Self::SessionAllocated => "SESSION_ALLOCATED",
+            Self::PromptSent => "PROMPT_SENT",
+        }
+    }
+}
+
+/// 运行收据目录：`<AppData>/agent/runs/<run-id>.jsonl`。
+fn runs_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法定位 Agent 运行收据目录: {error}"))?
+        .join("agent")
+        .join("runs");
+    fs::create_dir_all(&dir).map_err(|error| format!("创建 Agent 运行收据目录失败: {error}"))?;
+    Ok(dir)
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 尽力而为地追加一条运行收据；run_id 已由 valid_identifier 约束为安全文件名。
+fn append_run_receipt(app: &AppHandle, run_id: &str, fields: Value) {
+    let Ok(dir) = runs_dir(app) else {
+        return;
+    };
+    let Some(extra) = fields.as_object() else {
+        return;
+    };
+    let mut line = serde_json::Map::new();
+    line.insert("ts".into(), json!(unix_ms()));
+    line.insert("runId".into(), json!(run_id));
+    for (key, value) in extra {
+        line.insert(key.clone(), value.clone());
+    }
+    let Ok(mut record) = serde_json::to_string(&Value::Object(line)) else {
+        return;
+    };
+    record.push('\n');
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{run_id}.jsonl")))
+    {
+        let _ = file.write_all(record.as_bytes());
+    }
+}
+
+/// 供其它模块（如 Agent Work 保存）补记运行收据，例如 WORK_SAVED。
+pub(crate) fn record_run_event(app: &AppHandle, run_id: &str, fields: Value) {
+    if !valid_identifier(run_id) {
+        return;
+    }
+    append_run_receipt(app, run_id, fields);
+}
+
+/// 最近一次 Pi 进程的 stderr 尾部，用于失败收据定位。
+fn stderr_tail(process: &ChildProcess) -> String {
+    let stderr = process.stderr();
+    if stderr.trim().is_empty() {
+        return String::new();
+    }
+    let tail = stderr
+        .chars()
+        .rev()
+        .take(RECEIPT_STDERR_TAIL_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    tail.trim_start().to_string()
 }
 
 fn wait_for_idle(process: &ChildProcess) -> Result<(), String> {
@@ -810,7 +993,8 @@ fn spawn_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("PI_SKIP_VERSION_CHECK", "1")
-        .env("STILLWRITE_PI_WORKSPACE_ROOT", workspace);
+        .env("STILLWRITE_PI_WORKSPACE_ROOT", workspace)
+        .env("PATH", launcher_env_path(&config.launcher));
     if let Some(provider) = &config.provider {
         command.arg("--provider").arg(provider);
     }
@@ -1051,11 +1235,56 @@ fn short_error(error: &str) -> String {
     clean.chars().take(512).collect()
 }
 
+/// 计算 Pi 子进程 PATH 应包含的候选目录。
+/// pi 脚本用 `#!/usr/bin/env node` 找解释器，而 GUI 启动的进程 PATH 不含
+/// 任何用户级 Node；且可执行文件若是符号链接，canonicalize 之后落在
+/// node_modules 深处（如 dist/bundle/），其父目录并没有 node。因此除
+/// 可执行文件自身目录外，还要带上已知的用户安装位置：
+/// `~/.local/share/pi-node/*/bin`（版本化自管安装、自带便携 node）与
+/// `~/.local/bin`。顺序：自身目录 → local/bin → 新版 pi-node 在前 → 原有 PATH。
+fn child_env_dirs(executable: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    fn record(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+        if !dirs.iter().any(|existing| existing == &dir) {
+            dirs.push(dir);
+        }
+    }
+    if let Some(parent) = executable.parent() {
+        record(&mut dirs, parent.to_path_buf());
+    }
+    let Some(home) = home else {
+        return dirs;
+    };
+    record(&mut dirs, home.join(".local").join("bin"));
+    let mut version_bins: Vec<PathBuf> =
+        fs::read_dir(home.join(".local").join("share").join("pi-node"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|entry| entry.path().join("bin"))
+            .filter(|bin| bin.is_dir())
+            .collect();
+    version_bins.sort_by(|left, right| right.cmp(left));
+    for bin in version_bins {
+        record(&mut dirs, bin);
+    }
+    dirs
+}
+
+fn launcher_env_path(launcher: &Launcher) -> OsString {
+    let base = env::var_os("PATH").unwrap_or_default();
+    let mut paths = child_env_dirs(&launcher.executable, user_home_dir().as_deref());
+    paths.extend(env::split_paths(&base));
+    env::join_paths(paths).unwrap_or(base)
+}
+
 fn probe_version(launcher: &Launcher, workspace: &Path) -> Result<String, String> {
     let output = Command::new(&launcher.executable)
         .current_dir(workspace)
         .arg("--version")
         .env("PI_SKIP_VERSION_CHECK", "1")
+        .env("PATH", launcher_env_path(launcher))
         .output()
         .map_err(|error| format!("启动 Pi 版本探测失败: {error}"))?;
     if !output.status.success() {
@@ -1079,31 +1308,58 @@ fn probe_version(launcher: &Launcher, workspace: &Path) -> Result<String, String
 }
 
 fn session_ref_from_state(session_root: &Path, state: &Value) -> Result<Option<String>, String> {
-    let Some(raw) = state.get("sessionFile").and_then(Value::as_str) else {
+    let Some(raw) = state
+        .get("sessionFile")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+    else {
         return Ok(None);
     };
     let path = PathBuf::from(raw);
-    let candidate = if path.is_absolute() {
-        path
-    } else {
-        session_root.join(path)
-    };
-    let canonical = candidate
-        .canonicalize()
-        .map_err(|error| format!("Pi session 路径不可用: {error}"))?;
     let root = session_root
         .canonicalize()
         .map_err(|error| format!("解析 Pi session 根目录失败: {error}"))?;
-    if !canonical.starts_with(&root) {
-        return Err("Pi session 路径不在 Workspace 专属 session 目录内".into());
-    }
-    let relative = canonical
-        .strip_prefix(&root)
-        .map_err(|_| "Pi session 路径无效".to_string())?;
-    if relative.as_os_str().is_empty() {
+    // Pi 把 session 文件延迟到首个 assistant response 才创建；prompt 发出前
+    // 该路径只是预定值。存在则实体校验，不存在时只做词法校验，绝不在
+    // 握手阶段因文件未落盘而阻断 prompt。
+    let parent_escape = path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir));
+    let candidate: PathBuf = if path.is_absolute() {
+        path.clone()
+    } else {
+        root.join(&path)
+    };
+    let relative: String = if candidate.is_file() {
+        let canonical = candidate
+            .canonicalize()
+            .map_err(|error| format!("Pi session 路径不可用: {error}"))?;
+        if !canonical.starts_with(&root) {
+            return Err("Pi session 路径不在 Workspace 专属 session 目录内".into());
+        }
+        canonical
+            .strip_prefix(&root)
+            .map_err(|_| "Pi session 路径无效".to_string())?
+            .to_string_lossy()
+            .replace('\\', "/")
+    } else {
+        if parent_escape {
+            return Err("Pi session 路径不允许包含 ..".into());
+        }
+        if !candidate.starts_with(&root) {
+            return Err("Pi session 路径不在 Workspace 专属 session 目录内".into());
+        }
+        candidate
+            .strip_prefix(&root)
+            .map_err(|_| "Pi session 路径无效".to_string())?
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    if relative.is_empty() {
         return Ok(None);
     }
-    Ok(Some(relative.to_string_lossy().replace('\\', "/")))
+    Ok(Some(relative))
 }
 
 fn state_model_info(state: &Value) -> (Option<String>, Option<String>) {
@@ -1184,64 +1440,124 @@ pub async fn agent_start(
     let root = workspace_root(&state)?;
     let process = PiProcessState::from_store(Arc::clone(&process.store));
     tauri::async_runtime::spawn_blocking(move || {
-        let config = launch_config_from_env()?;
-        let child = process.ensure_for_workspace(&app, &root, config)?;
-        if child.active_run().is_some() {
-            return Err("已有 Agent 工作正在运行".into());
-        }
-        let new_session = child.request(json!({ "type": "new_session" }), COMMAND_TIMEOUT)?;
-        if !new_session.success {
-            return Err(rpc_failure("创建 Pi session 失败", &new_session));
-        }
-        if new_session
-            .data
-            .as_ref()
-            .and_then(|data| data.get("cancelled"))
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
-            return Err("Pi 取消了新 session".into());
-        }
-
-        let named = child.request(
-            json!({ "type": "set_session_name", "name": title }),
-            COMMAND_TIMEOUT,
-        )?;
-        if !named.success {
-            return Err(rpc_failure("设置 Pi session 名称失败", &named));
-        }
-        let state_response = child.request(json!({ "type": "get_state" }), COMMAND_TIMEOUT)?;
-        if !state_response.success {
-            return Err(rpc_failure("读取 Pi session 状态失败", &state_response));
-        }
-        let state_data = state_response.data.unwrap_or(Value::Null);
-        let session_ref = session_ref_from_state(&child.inner.session_root, &state_data)?;
-        child.begin_run(ActiveRun {
-            run_id: run_id.clone(),
-            session_ref: session_ref.clone(),
-            settling: false,
-        })?;
-        let prompt_response = child.request(
-            json!({ "type": "prompt", "message": prompt }),
-            COMMAND_TIMEOUT,
-        );
-        let prompt_response = match prompt_response {
-            Ok(response) => response,
-            Err(error) => {
-                child.clear_run();
-                return Err(error);
+        // 状态链：STARTING_PI → PI_READY → SESSION_ALLOCATED → PROMPT_SENT，
+        // 之后由事件侧接管（MODEL_RUNNING → STREAMING → SETTLED / FAILED）。
+        let mut stage = StartStage::StartingPi;
+        let mut child_slot: Option<ChildProcess> = None;
+        let outcome: Result<AgentStartResponse, String> = (|| {
+            let config = launch_config_from_env()?;
+            let child = process.ensure_for_workspace(&app, &root, config)?;
+            child_slot = Some(child.clone());
+            stage = StartStage::PiReady;
+            append_run_receipt(
+                &app,
+                &run_id,
+                json!({ "event": "stage", "stage": "PI_READY" }),
+            );
+            if child.active_run().is_some() {
+                return Err("已有 Agent 工作正在运行".into());
             }
-        };
-        if !prompt_response.success {
-            child.clear_run();
-            return Err(rpc_failure("Pi 拒绝 Agent 请求", &prompt_response));
+            let new_session = child.request(json!({ "type": "new_session" }), COMMAND_TIMEOUT)?;
+            if !new_session.success {
+                return Err(rpc_failure("创建 Pi session 失败", &new_session));
+            }
+            if new_session
+                .data
+                .as_ref()
+                .and_then(|data| data.get("cancelled"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                return Err("Pi 取消了新 session".into());
+            }
+
+            let named = child.request(
+                json!({ "type": "set_session_name", "name": title }),
+                COMMAND_TIMEOUT,
+            )?;
+            if !named.success {
+                return Err(rpc_failure("设置 Pi session 名称失败", &named));
+            }
+            let state_response = child.request(json!({ "type": "get_state" }), COMMAND_TIMEOUT)?;
+            if !state_response.success {
+                return Err(rpc_failure("读取 Pi session 状态失败", &state_response));
+            }
+            let state_data = state_response.data.unwrap_or(Value::Null);
+            // 此处只解析逻辑引用，不要求文件已落盘；实体校验推迟到首个
+            // assistant response 之后的 resolve_settled_run。
+            let session_ref = session_ref_from_state(&child.inner.session_root, &state_data)?;
+            let (provider, model) = state_model_info(&state_data);
+            stage = StartStage::SessionAllocated;
+            append_run_receipt(
+                &app,
+                &run_id,
+                json!({
+                    "event": "stage",
+                    "stage": "SESSION_ALLOCATED",
+                    "piSessionRef": session_ref,
+                    "provider": provider,
+                    "model": model,
+                    "title": title,
+                }),
+            );
+            child.begin_run(ActiveRun {
+                run_id: run_id.clone(),
+                session_ref: session_ref.clone(),
+                settling: false,
+            })?;
+            let prompt_response = child.request(
+                json!({ "type": "prompt", "message": prompt }),
+                COMMAND_TIMEOUT,
+            );
+            let prompt_response = match prompt_response {
+                Ok(response) => response,
+                Err(error) => {
+                    child.clear_run();
+                    return Err(error);
+                }
+            };
+            if !prompt_response.success {
+                child.clear_run();
+                return Err(rpc_failure("Pi 拒绝 Agent 请求", &prompt_response));
+            }
+            stage = StartStage::PromptSent;
+            append_run_receipt(
+                &app,
+                &run_id,
+                json!({
+                    "event": "stage",
+                    "stage": "PROMPT_SENT",
+                    "requestId": prompt_response.id,
+                    "title": title,
+                }),
+            );
+            Ok(AgentStartResponse {
+                accepted: true,
+                // 不能把 run_id move 进响应：外层失败路径还要用它写收据。
+                run_id: run_id.clone(),
+                request_id: prompt_response.id.unwrap_or_else(|| "unknown".into()),
+                pi_session_ref: session_ref,
+            })
+        })();
+        if let Err(error) = &outcome {
+            let mut fields = serde_json::Map::new();
+            fields.insert("event".into(), json!("failed"));
+            fields.insert("stage".into(), json!(stage.label()));
+            fields.insert("error".into(), json!(short_error(error)));
+            if let Some(child) = child_slot.as_ref() {
+                let tail = stderr_tail(child);
+                if !tail.is_empty() {
+                    fields.insert("stderr".into(), json!(tail));
+                }
+            }
+            append_run_receipt(&app, &run_id, Value::Object(fields));
+            return Err(format!(
+                "Agent 启动在 {} 阶段失败：{}",
+                stage.label(),
+                error
+            ));
         }
-        Ok(AgentStartResponse {
-            accepted: true,
-            run_id,
-            request_id: prompt_response.id.unwrap_or_else(|| "unknown".into()),
-            pi_session_ref: session_ref,
-        })
+        outcome
     })
     .await
     .map_err(|error| format!("Agent start 任务异常: {error}"))?
@@ -1292,6 +1608,122 @@ pub async fn agent_abort(process: State<'_, PiProcessState>) -> Result<AgentAbor
     })
     .await
     .map_err(|error| format!("Agent abort 任务异常: {error}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunReceiptSummary {
+    pub run_id: String,
+    pub started_at: Option<u64>,
+    pub ended_at: Option<u64>,
+    pub title: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    /// 最后一次记录到的状态链阶段，如 SESSION_ALLOCATED、SETTLED、FAILED。
+    pub stage: Option<String>,
+    /// settled | failed | stopped | unknown（unknown 含进行中与异常中断）。
+    pub outcome: String,
+    pub error: Option<String>,
+}
+
+/// 读取持久化运行收据（`<AppData>/agent/runs/*.jsonl`），最近优先。
+/// 目的：任何一步失败在重启应用之后仍然可查，而不是只活在 WebView 内存里。
+#[tauri::command]
+pub async fn agent_recent_runs(app: AppHandle) -> Result<Vec<AgentRunReceiptSummary>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_run_receipts(&app))
+        .await
+        .map_err(|error| format!("读取 Agent 运行收据任务异常: {error}"))?
+}
+
+fn list_run_receipts(app: &AppHandle) -> Result<Vec<AgentRunReceiptSummary>, String> {
+    let dir = runs_dir(app)?;
+    let mut files: Vec<(PathBuf, SystemTime)> = fs::read_dir(&dir)
+        .map_err(|error| format!("读取 Agent 运行收据目录失败: {error}"))?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((path, modified))
+        })
+        .collect();
+    files.sort_by(|left, right| right.1.cmp(&left.1));
+    files.truncate(RECEIPT_MAX_RUNS);
+    Ok(files
+        .into_iter()
+        .filter_map(|(path, _)| summarize_receipt(&path).ok().flatten())
+        .collect())
+}
+
+fn truncate_text(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+fn summarize_receipt(path: &Path) -> Result<Option<AgentRunReceiptSummary>, String> {
+    let Some(run_id) = path.file_stem().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    if !valid_identifier(run_id) {
+        return Ok(None);
+    }
+    let body = fs::read_to_string(path).map_err(|error| format!("读取运行收据失败: {error}"))?;
+    let mut summary = AgentRunReceiptSummary {
+        run_id: run_id.to_string(),
+        started_at: None,
+        ended_at: None,
+        title: None,
+        provider: None,
+        model: None,
+        stage: None,
+        outcome: "unknown".into(),
+        error: None,
+    };
+    for line in body.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let ts = record.get("ts").and_then(Value::as_u64);
+        if summary.started_at.is_none() {
+            summary.started_at = ts;
+        }
+        if ts.is_some() {
+            summary.ended_at = ts;
+        }
+        for key in ["title", "provider", "model"] {
+            if let Some(value) = record.get(key).and_then(Value::as_str) {
+                if !value.is_empty() {
+                    summary_stage_set(&mut summary, key, value);
+                }
+            }
+        }
+        if let Some(stage) = record.get("stage").and_then(Value::as_str) {
+            summary.stage = Some(stage.to_string());
+        }
+        match record.get("event").and_then(Value::as_str) {
+            Some("failed") => {
+                summary.outcome = "failed".into();
+                summary.error = record
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(|error| truncate_text(error, 400));
+            }
+            Some("agent_settled") => summary.outcome = "settled".into(),
+            Some("agent_stopped") => summary.outcome = "stopped".into(),
+            _ => {}
+        }
+    }
+    Ok(Some(summary))
+}
+
+fn summary_stage_set(summary: &mut AgentRunReceiptSummary, key: &str, value: &str) {
+    match key {
+        "title" => summary.title = Some(value.to_string()),
+        "provider" => summary.provider = Some(value.to_string()),
+        "model" => summary.model = Some(value.to_string()),
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -1580,6 +2012,83 @@ done
     }
 
     #[test]
+    fn session_reference_accepts_logical_path_before_materialization() {
+        let root = temp_dir("session-ref-logical");
+        // Pi 把 session 文件延迟到首个 assistant response 才创建；
+        // prompt 之前只存在预定的逻辑路径，必须被接受。
+        let state = json!({ "sessionFile": "2026-08/session.jsonl" });
+        assert_eq!(
+            session_ref_from_state(&root, &state).unwrap(),
+            Some("2026-08/session.jsonl".into())
+        );
+        // 已落盘的文件（含绝对路径）仍要做实体校验并归一化。
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("nested").join("real.jsonl"), "{}").unwrap();
+        let state = json!({ "sessionFile": root.join("nested").join("real.jsonl") });
+        assert_eq!(
+            session_ref_from_state(&root, &state).unwrap(),
+            Some("nested/real.jsonl".into())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn session_reference_rejects_missing_absolute_path_outside_root() {
+        let root = temp_dir("session-ref-absent");
+        let state = json!({ "sessionFile": "/tmp/no-such-sw-session-file.jsonl" });
+        let error = session_ref_from_state(&root, &state).unwrap_err();
+        assert!(error.contains("不在"), "unexpected error: {error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_receipt_summary_extracts_stage_and_failure() {
+        let dir = temp_dir("receipt-summary");
+        let path = dir.join("run-failed-1.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"ts\":100,\"runId\":\"run-failed-1\",\"event\":\"stage\",\"stage\":\"PI_READY\"}\n",
+                "{\"ts\":101,\"runId\":\"run-failed-1\",\"event\":\"stage\",\"stage\":\"SESSION_ALLOCATED\",\"provider\":\"openai\",\"model\":\"gpt\",\"title\":\"问答\"}\n",
+                "{\"ts\":102,\"runId\":\"run-failed-1\",\"event\":\"failed\",\"stage\":\"PROMPT_SENT\",\"error\":\"等待 Pi RPC 响应超时\"}\n"
+            ),
+        )
+        .unwrap();
+        let summary = summarize_receipt(&path).unwrap().unwrap();
+        assert_eq!(summary.run_id, "run-failed-1");
+        assert_eq!(summary.outcome, "failed");
+        assert_eq!(summary.stage.as_deref(), Some("PROMPT_SENT"));
+        assert_eq!(summary.title.as_deref(), Some("问答"));
+        assert_eq!(summary.provider.as_deref(), Some("openai"));
+        assert_eq!(summary.model.as_deref(), Some("gpt"));
+        assert_eq!(summary.started_at, Some(100));
+        assert_eq!(summary.ended_at, Some(102));
+        assert_eq!(summary.error.as_deref(), Some("等待 Pi RPC 响应超时"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn run_receipt_summary_reports_settled_runs() {
+        let dir = temp_dir("receipt-settled");
+        let path = dir.join("run-ok-1.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"ts\":10,\"runId\":\"run-ok-1\",\"event\":\"stage\",\"stage\":\"PROMPT_SENT\",\"title\":\"总结\"}\n",
+                "{\"ts\":11,\"runId\":\"run-ok-1\",\"event\":\"agent_settled\",\"stage\":\"SETTLED\",\"textLength\":42}\n",
+                "{\"ts\":12,\"runId\":\"run-ok-1\",\"event\":\"work_saved\",\"stage\":\"WORK_SAVED\"}\n"
+            ),
+        )
+        .unwrap();
+        let summary = summarize_receipt(&path).unwrap().unwrap();
+        assert_eq!(summary.outcome, "settled");
+        assert_eq!(summary.stage.as_deref(), Some("WORK_SAVED"));
+        assert_eq!(summary.error, None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     #[cfg(unix)]
     fn fake_pi_streams_and_settles_with_authoritative_text() {
         let root = temp_dir("fake-stream");
@@ -1663,6 +2172,99 @@ done
             Some("hello world")
         );
         assert!(!process.is_dead());
+        process.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launcher_dir_is_prepended_to_child_path() {
+        let root = temp_dir("env-path");
+        let executable = root.join("bin").join("pi");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let launcher = Launcher {
+            executable,
+            label: "fake".into(),
+        };
+        let path_value = launcher_env_path(&launcher);
+        let mut parts = env::split_paths(&path_value);
+        assert_eq!(parts.next().as_deref(), Some(root.join("bin").as_path()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn child_env_dirs_include_user_node_installs() {
+        // 符号链接安装形态下，canonicalize 后的可执行文件在 node_modules
+        // 深处；其所在目录必须仍在候选里，但 pi-node 的版本化 bin 目录
+        // （带便携 node）与 ~/.local/bin 也必须被纳入，且新版本优先。
+        let home = temp_dir("env-home");
+        let node_bin = home.join(".local/share/pi-node/node-v22-fake-linux-x64/bin");
+        let older_bin = home.join(".local/share/pi-node/node-v20-fake-linux-x64/bin");
+        fs::create_dir_all(&node_bin).unwrap();
+        fs::create_dir_all(&older_bin).unwrap();
+        let exec_root = temp_dir("env-exec-dir");
+        let executable = exec_root.join("deep").join("cli.js");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+
+        let dirs = child_env_dirs(&executable, Some(&home));
+        assert_eq!(dirs[0], executable.parent().unwrap());
+        assert!(dirs.contains(&home.join(".local/bin")));
+        let newest = dirs.iter().position(|dir| dir == &node_bin).unwrap();
+        let older = dirs.iter().position(|dir| dir == &older_bin).unwrap();
+        assert!(newest < older);
+
+        let minimal = child_env_dirs(&executable, None);
+        assert_eq!(minimal, vec![executable.parent().unwrap()]);
+
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(exec_root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn env_shebang_resolves_sibling_interpreter_via_child_path() {
+        // 复刻 pi-node 用户目录安装形态：脚本与解释器同目录，
+        // 脚本用 #!/usr/bin/env 找解释器。修复前 spawn 直接失败。
+        let root = temp_dir("env-shebang");
+        let bin = root.join("pi-bin");
+        fs::create_dir_all(&bin).unwrap();
+        make_executable(&bin.join("swfake-node"), "#!/bin/sh\nexec /bin/sh \"$@\"\n");
+        make_executable(
+            &bin.join("pi"),
+            r#"#!/usr/bin/env swfake-node
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"type":"get_state"'*) printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{}}\n' "$id" ;;
+  esac
+done
+"#,
+        );
+        let config = LaunchConfig {
+            launcher: Launcher {
+                executable: bin.join("pi"),
+                label: "fake".into(),
+            },
+            provider: None,
+            model: None,
+            thinking: None,
+            agent_dir: None,
+        };
+        let resources = RuntimeResources {
+            system_prompt: root.join("SYSTEM.md"),
+            extension: root.join("tools.ts"),
+        };
+        fs::write(&resources.system_prompt, SYSTEM_PROMPT).unwrap();
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let events_sink = Arc::clone(&events);
+        let sink: EventSink = Arc::new(move |event| events_sink.lock().unwrap().push(event));
+        let process =
+            spawn_process(&config, &root, &root.join("sessions"), &resources, sink).unwrap();
+        let handshake = process
+            .request(json!({ "type": "get_state" }), COMMAND_TIMEOUT)
+            .expect("handshake with env-shebang interpreter should succeed");
+        assert!(handshake.success);
         process.shutdown();
         fs::remove_dir_all(root).unwrap();
     }

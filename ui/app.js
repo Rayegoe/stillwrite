@@ -112,6 +112,8 @@ const citationBasket = new Map();
 let agentWorkItems = [];
 let pendingAgentRequest = null;
 let localAgentRuns = [];
+// 持久化运行收据里的失败记录（AppData/agent/runs），重启应用后仍可见。
+let historicAgentFailures = [];
 let saveTimer = null;
 let sidebarWidth = Number(
 	localStorage.getItem("stillwrite.sidebarWidth") || 248,
@@ -1542,6 +1544,11 @@ function renderLibraryHome() {
 	treeEl.replaceChildren();
 	const fragment = document.createDocumentFragment();
 
+	// 文章才是一级对象：最近 RSS 直接置顶，进资料页先看到内容。
+	if (rssLibrarySource || feedSources.length) {
+		treeEl.appendChild(renderRssRecentSection());
+	}
+
 	const section = document.createElement("div");
 	section.className = "library-section";
 	const title = document.createElement("div");
@@ -1579,23 +1586,26 @@ function renderLibraryHome() {
 			row.append(name, root);
 			fragment.appendChild(row);
 		}
-		if (rssLibrarySource) fragment.appendChild(renderRssSection());
+		if (rssLibrarySource || feedSources.length) {
+			fragment.appendChild(renderFeedManagerSection());
+		}
 	}
 	section.appendChild(fragment);
 	treeEl.appendChild(section);
 }
 
-function renderRssSection() {
+/// 最近 RSS：一级消费入口，展示最新物化的文章卡片。
+function renderRssRecentSection() {
 	const wrap = document.createElement("div");
-	wrap.className = "rss-section";
+	wrap.className = "rss-section rss-recent";
 
-	const row = document.createElement("div");
-	row.className = "library-source rss-row";
-	row.title = "点击展开 / 收起 RSS 源列表";
+	const head = document.createElement("div");
+	head.className = "rss-recent-head";
 	const name = document.createElement("div");
 	name.className = "library-source-name";
 	const label = document.createElement("span");
-	label.textContent = "RSS";
+	label.className = "recent-title";
+	label.textContent = "最近 RSS";
 	const count = document.createElement("span");
 	count.className = "library-source-count";
 	count.id = "rssSourceCount";
@@ -1615,7 +1625,40 @@ function renderRssSection() {
 		void refreshAllFeeds();
 	});
 	actions.appendChild(refreshAll);
-	row.append(name, actions);
+	head.append(name, actions);
+	wrap.appendChild(head);
+
+	const recentList = document.createElement("div");
+	recentList.className = "feed-recent-list";
+	if (!feedRecent.length) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip";
+		tip.textContent = "刷新后，最新的 RSS 条目会作为普通资料出现在这里。";
+		recentList.appendChild(tip);
+	} else {
+		for (const item of feedRecent) {
+			recentList.appendChild(renderFeedRecentCard(item));
+		}
+	}
+	wrap.appendChild(recentList);
+	return wrap;
+}
+
+/// 订阅源是设置对象：默认折叠，点开做源级别的增删与刷新。
+function renderFeedManagerSection() {
+	const wrap = document.createElement("div");
+
+	const row = document.createElement("div");
+	row.className = "library-source rss-row";
+	row.title = "点击展开 / 收起订阅源列表";
+	const name = document.createElement("div");
+	name.className = "library-source-name";
+	const label = document.createElement("span");
+	label.textContent = "订阅源";
+	const count = document.createElement("span");
+	count.className = "library-source-count";
+	count.textContent = `${feedSources.length} 个`;
+	name.append(label, count);
 	wrap.appendChild(row);
 
 	const listWrap = document.createElement("div");
@@ -1638,24 +1681,6 @@ function renderRssSection() {
 		if (event.target.closest("button")) return;
 		listWrap.classList.toggle("collapsed");
 	});
-
-	const recentTitle = document.createElement("div");
-	recentTitle.className = "library-section-title recent-title";
-	recentTitle.textContent = "最近 RSS";
-	wrap.appendChild(recentTitle);
-	const recentList = document.createElement("div");
-	recentList.className = "feed-recent-list";
-	if (!feedRecent.length) {
-		const tip = document.createElement("div");
-		tip.className = "empty-tip";
-		tip.textContent = "刷新后，最新的 RSS 条目会作为普通资料出现在这里。";
-		recentList.appendChild(tip);
-	} else {
-		for (const item of feedRecent) {
-			recentList.appendChild(renderFeedRecentCard(item));
-		}
-	}
-	wrap.appendChild(recentList);
 	return wrap;
 }
 
@@ -1960,6 +1985,7 @@ async function setSidebarMode(mode) {
 		await loadFeedStatus();
 		maybeAutoRefreshFeeds();
 	} else if (agentMode) {
+		await loadHistoricAgentFailures();
 		await loadAgentWorks();
 	} else if (lastTreeNodes.length) {
 		renderTree(lastTreeNodes);
@@ -2059,6 +2085,7 @@ async function refreshTree() {
 		return;
 	}
 	if (agentMode) {
+		await loadHistoricAgentFailures();
 		await loadAgentWorks();
 		return;
 	}
@@ -2069,6 +2096,23 @@ async function refreshTree() {
 	} catch (error) {
 		console.error(error);
 		markError("刷新失败");
+	}
+}
+
+function shortAgentError(error) {
+	const text = String(error).replace(/\s+/g, " ").trim();
+	return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+
+async function loadHistoricAgentFailures() {
+	try {
+		const runs = await invoke("agent_recent_runs");
+		historicAgentFailures = (runs || []).filter(
+			(receipt) => receipt.outcome === "failed",
+		);
+	} catch (error) {
+		console.error("读取历史失败记录失败", error);
+		historicAgentFailures = [];
 	}
 }
 
@@ -2153,7 +2197,7 @@ function renderAgentWorks(items = allAgentWorkItems()) {
 		: localAgentRuns.length
 			? `${localAgentRuns.length} 个运行中`
 			: "还没有 Agent 工作";
-	if (!items.length) {
+	if (!items.length && !historicAgentFailures.length) {
 		const tip = document.createElement("div");
 		tip.className = "empty-tip agent-empty-tip";
 		tip.textContent = searchInput.value.trim()
@@ -2163,6 +2207,20 @@ function renderAgentWorks(items = allAgentWorkItems()) {
 		return;
 	}
 	const fragment = document.createDocumentFragment();
+	const visibleReceipts = historicAgentFailures.filter(
+		(receipt) => !localAgentRuns.some((item) => item.id === receipt.runId),
+	);
+	for (const receipt of visibleReceipts) {
+		fragment.appendChild(renderHistoricRunFailure(receipt));
+	}
+	if (!items.length && visibleReceipts.length) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip agent-empty-tip";
+		tip.textContent = searchInput.value.trim()
+			? "没有匹配的 Agent 工作"
+			: "还没有 Agent 工作。选中文字后点“问 Agent”，结果会在这里成为可编辑文档。";
+		fragment.appendChild(tip);
+	}
 	for (const item of items) {
 		const row = document.createElement("div");
 		row.className = `agent-work-item${item.id === currentAgentDocument?.id ? " active" : ""}`;
@@ -2213,6 +2271,33 @@ function renderAgentWorks(items = allAgentWorkItems()) {
 		fragment.appendChild(row);
 	}
 	treeEl.appendChild(fragment);
+}
+
+/// 持久化失败收据的只读展示：阶段 + 错误 + 时间，重启后仍然可见。
+function renderHistoricRunFailure(receipt) {
+	const rowEl = document.createElement("div");
+	rowEl.className = "agent-work-item agent-run-receipt";
+	rowEl.title =
+		"上次运行失败的持久化收据（AppData/agent/runs），重启应用后仍可查";
+	const open = document.createElement("div");
+	open.className = "agent-work-open";
+	const titleEl = document.createElement("strong");
+	titleEl.className = "agent-work-title";
+	titleEl.textContent = receipt.title || "未命名 Agent 运行";
+	const meta = document.createElement("span");
+	meta.className = "agent-work-meta";
+	const parts = ["运行失败"];
+	if (receipt.stage) parts.push(`阶段 ${receipt.stage}`);
+	parts.push(formatAgentTime(receipt.endedAt || receipt.startedAt || 0));
+	meta.textContent = parts.join(" · ");
+	const detail = document.createElement("span");
+	detail.className = "agent-work-preview";
+	detail.textContent = receipt.error
+		? `错误：${shortAgentError(receipt.error)}`
+		: "未记录错误详情，完整收据见 AppData/agent/runs";
+	open.append(titleEl, meta, detail);
+	rowEl.appendChild(open);
+	return rowEl;
 }
 
 async function loadAgentWorks() {
@@ -2722,6 +2807,7 @@ async function submitAgentQuestion(event) {
 				originUri: request.originUri,
 				originQuote: request.originQuote,
 				piSessionRef: terminal.piSessionRef || run.piSessionRef || null,
+				runId: run.id,
 			},
 		});
 		addCompletedAgentWork(document);
@@ -2739,7 +2825,10 @@ async function submitAgentQuestion(event) {
 			local.updatedAt = Math.floor(Date.now() / 1000);
 		}
 		if (agentMode) renderAgentWorks();
-		markError(agentCancelRequested ? "Agent 已停止" : "Agent 失败");
+		markError(
+			agentCancelRequested ? "Agent 已停止" : `Agent 失败：${shortAgentError(error)}`,
+		);
+		void loadHistoricAgentFailures();
 	} finally {
 		agentBusy = false;
 		activeAgentRunId = null;

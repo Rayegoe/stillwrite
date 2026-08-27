@@ -748,7 +748,21 @@ async fn create_agent_work(
     input: agent_work::CreateAgentWorkInput,
 ) -> Result<agent_work::AgentWorkDocument, String> {
     let root = workspace_root(&state)?;
-    agent_work::create(&app, &root, input)
+    let run_id = input.run_id.clone();
+    let document = agent_work::create(&app, &root, input)?;
+    // 状态链最后一环：结果已固化为可编辑的 Agent Work（尽力而为，不影响保存）。
+    if let Some(run_id) = run_id {
+        crate::pi_agent::record_run_event(
+            &app,
+            &run_id,
+            serde_json::json!({
+                "event": "work_saved",
+                "stage": "WORK_SAVED",
+                "workId": document.id
+            }),
+        );
+    }
+    Ok(document)
 }
 
 /// 保存 Agent 工作文档正文；正文变化不会进入 Workspace 索引或文件树。
@@ -945,7 +959,8 @@ pub fn run() {
             sync_workspace,
             pi_agent::agent_probe,
             pi_agent::agent_start,
-            pi_agent::agent_abort
+            pi_agent::agent_abort,
+            pi_agent::agent_recent_runs
         ])
         .run(tauri::generate_context!())
         .expect("error while running Stillwrite");

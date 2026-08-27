@@ -246,7 +246,9 @@ pub fn read_at(
 }
 
 /// 按 source 列出最近文档（只查现有 library_documents，不建 RSS 专属表）。
-/// 文件名按 `<date>__…` 物化时，`ORDER BY relative_path DESC` 即时间倒序。
+/// RSS 物化路径是 `<feed-id>/<date>__<title>__<id>.md`：首段是 feed-id 而非日期，
+/// 直接 `ORDER BY relative_path DESC` 会先按订阅源字典序分组；多源混排时必须按
+/// 首个 `/` 之后的 10 位日期段倒序，mtime 只做同日内的稳定次序。
 pub fn list_source_documents(
     db_path: &Path,
     source_id: &str,
@@ -260,7 +262,14 @@ pub fn list_source_documents(
              FROM library_documents d
              JOIN library_sources s ON s.id = d.source_id
              WHERE d.source_id = ?1
-             ORDER BY d.relative_path DESC
+             ORDER BY
+               CASE
+                 WHEN instr(d.relative_path, '/') > 0
+                 THEN substr(d.relative_path, instr(d.relative_path, '/') + 1, 10)
+                 ELSE ''
+               END DESC,
+               d.mtime DESC,
+               d.relative_path DESC
              LIMIT ?2",
         )
         .map_err(|e| format!("读取资料列表失败: {e}"))?;
@@ -960,5 +969,40 @@ mod tests {
         let result = refresh_at(&db).unwrap();
         assert_eq!(result.removed, 1);
         assert_eq!(search_at(&db, "要删除", 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn recent_documents_interleave_feeds_by_date_segment() {
+        // 回归：RSS 多源混排时，“最近”必须跨 feed 目录按日期段倒序，
+        // 而不是先按 feed-id 字典序分组（旧实现的实际行为）。
+        let keep = TempDir::new();
+        let root = keep.path().join("rss-root");
+        let entries = [
+            ("feed-alpha", "2026-08-26", "最新文章"),
+            ("feed-zulu", "2026-08-20", "最旧文章"),
+            ("feed-max", "2026-08-23", "中间文章"),
+        ];
+        for (feed, date, title) in entries {
+            fs::create_dir_all(root.join(feed)).unwrap();
+            fs::write(
+                root.join(feed).join(format!("{date}__{title}__hash.md")),
+                format!("# {title}\n\n正文摘要，足够触发分词。\n"),
+            )
+            .unwrap();
+        }
+        let db = keep.path().join("library.db");
+        let result = register_source_at(&db, &canonical_source_root(&root).unwrap()).unwrap();
+        let id = result.sources[0].id.clone();
+
+        let documents = list_source_documents(&db, &id, 10).unwrap();
+        let titles: Vec<&str> = documents.iter().map(|d| d.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "2026-08-26__最新文章__hash",
+                "2026-08-23__中间文章__hash",
+                "2026-08-20__最旧文章__hash"
+            ]
+        );
     }
 }
