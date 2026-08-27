@@ -201,6 +201,8 @@ queued | running | succeeded | failed | cancelled
 
 ### works
 
+M1 已落地的 bridge schema（state.db migration v4）。每条新的 Pi 请求对应一行 Work：
+
 ```text
 id
 workspace_id
@@ -209,6 +211,8 @@ intent
 status
 summary
 next_action
+artifact_uri
+receipt_ref
 created_at
 updated_at
 ```
@@ -220,6 +224,10 @@ queued | running | needs_human | blocked | completed | failed | cancelled
 ```
 
 Run `succeeded` 不自动等于 Work `completed`。只有验收条件满足时，Work 才能完成；可恢复的 Run failure 通常使 Work `blocked`，不可恢复 failure 才使 Work `failed`。
+
+Pi 桥接映射（`receipt_ref` 保存 run id，收据本体留在 `<AppData>/agent/runs/`）：请求创建=`queued`；Pi accepted=`running`；Agent Work Artifact 保存=`needs_human`（`artifact_uri` 记录 canonical `agentwork://` URI）；abort=`cancelled`；依赖缺失（缺 Pi/模型）=`blocked`；致命错误=`failed`；人明确接受=`completed`。Pi 返回最终文本（settled）不是 Work 状态变化。
+
+Work 语义事件只有三个动作：`work.created` / `work.status_changed` / `work.updated`，与状态变更同事务落地（`work://<work-id>` 为 object URI）。
 
 ### work_relations
 

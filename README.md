@@ -291,6 +291,7 @@ stillwrite/
     ├── src/feeds.rs    # RSS/Atom 源：抓取 + 解析 + 物化 Markdown + OPML 导入 + 单测
     ├── src/sync.rs     # git 同步引擎（最后写入者胜 + 单测 + 板子集成测试）
     ├── src/state_store.rs # vNext P1 durable state（state.db）：migration runner + events/anchors/relations/context 原语与事务边界
+    ├── src/work.rs     # Work durable 协调对象（M1）：状态机 + work.created/status_changed/updated 事件 + Pi 桥接查询
     ├── resources/pi/  # StillWrite system prompt 与只读 Workspace 工具扩展
     ├── capabilities/   # 最小 IPC 权限
     └── tauri.conf.json # 直接把 ../ui 嵌入桌面应用
@@ -303,7 +304,7 @@ node ui/annotations.test.js # 结构化批注前端单元测试
 node ui/document-links.test.js # 项目内文档链接与 URL 单元测试
 node ui/agent-events.test.js # Agent 流式事件归约与结束状态测试
 cd src-tauri
-cargo test                # 默认单测、批注流程测试与 state.db durable 契约测试；另有 2 个按需调试/网络测试
+cargo test                # 默认单测、批注流程测试、state.db durable 契约与 Work 生命周期（无 UI）测试；另有 2 个按需调试/网络测试
 cargo test -- --ignored live   # 需要配置的远程设备在线：真实跨设备推送/拉取/冲突收敛
 ```
 

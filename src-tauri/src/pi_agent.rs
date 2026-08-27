@@ -23,6 +23,8 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::state_store::ActorKind;
+use crate::work::{self, WorkStatus};
 use crate::{agent_work, atomic_write, workspace_root, AppState};
 
 const MAX_RPC_RECORD_SIZE: usize = 2 * 1024 * 1024;
@@ -568,7 +570,9 @@ impl PiProcessState {
             .and_then(|runtime| runtime.as_ref().map(|runtime| runtime.process.clone()))
     }
 
-    pub fn shutdown_for_workspace(&self, next_root: &Path) {
+    /// 关闭属于其它 Workspace 的 Pi 进程。若进程上有进行中的 run，
+    /// 返回其 run id（调用方负责把对应 Work 转为 cancelled）。
+    pub fn shutdown_for_workspace(&self, next_root: &Path) -> Option<String> {
         let old = self.store.runtime.lock().ok().and_then(|mut runtime| {
             if runtime
                 .as_ref()
@@ -580,6 +584,9 @@ impl PiProcessState {
                 None
             }
         });
+        let aborted_run = old
+            .as_ref()
+            .and_then(|runtime| runtime.process.active_run().map(|run| run.run_id));
         if let Some(runtime) = old {
             let process = runtime.process.clone();
             if process.active_run().is_some() {
@@ -588,6 +595,7 @@ impl PiProcessState {
             }
             process.shutdown();
         }
+        aborted_run
     }
 }
 
@@ -658,6 +666,11 @@ fn journal_pipeline_event(app: &AppHandle, streaming_runs: &Mutex<HashSet<String
             if let Some(message) = object.get("message") {
                 fields.insert("error".into(), message.clone());
             }
+            let reason = object
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Pi 运行失败");
+            fail_run_work(app, run_id, reason);
         }
         _ => return,
     }
@@ -750,6 +763,61 @@ pub(crate) fn record_run_event(app: &AppHandle, run_id: &str, fields: Value) {
         return;
     }
     append_run_receipt(app, run_id, fields);
+}
+
+// ---------------------------------------------------------------------------
+// Pi → Work bridge（M1）
+//
+// 一次 Pi 请求对应一条 durable Work（receipt_ref = run id）。状态映射：
+// 请求创建=queued；Pi accepted=running；Artifact 保存（lib.rs）=needs_human；
+// abort=cancelled；依赖缺失=blocked；致命错误=failed；
+// 人明确接受=completed（Work 侧 completed 转换，UI 待 M2 接入）。
+// Pi 返回最终文本不是任何 Work 状态变化——settled 后仍停在 running，
+// 直到 Artifact 固化为 needs_human。
+// ---------------------------------------------------------------------------
+
+/// 按收据引用推进 Work 状态。桥接是尽力而为的：状态库不可用时请求本身
+/// 不回滚（运行收据仍记录事实），只留下 stderr 痕迹。
+fn transition_run_work(
+    app: &AppHandle,
+    run_id: &str,
+    to: WorkStatus,
+    actor: ActorKind,
+    reason: Option<&str>,
+) {
+    if !valid_identifier(run_id) {
+        return;
+    }
+    let result = (|| -> Result<(), String> {
+        let mut conn = crate::open_durable_state(app)?;
+        let Some(record) = work::find_work_by_receipt(&conn, run_id)? else {
+            // 旧请求 / 无 Work 的运行路径：没有可推进的对象，不算错误。
+            return Ok(());
+        };
+        work::transition_work(&mut conn, &record.id, to, actor, reason).map(|_| ())
+    })();
+    if let Err(error) = result {
+        eprintln!("推进 Work 状态失败 (run {run_id} → {}): {error}", to.as_str());
+    }
+}
+
+/// abort 语义的 Work 取消（用户停止 / 切换工作区中止）。
+pub(crate) fn cancel_run_work(app: &AppHandle, run_id: &str, reason: &str) {
+    transition_run_work(app, run_id, WorkStatus::Cancelled, ActorKind::Human, Some(reason));
+}
+
+/// 运行期致命错误（Pi 进程死亡 / 扩展报错）→ Work failed。
+fn fail_run_work(app: &AppHandle, run_id: &str, reason: &str) {
+    transition_run_work(app, run_id, WorkStatus::Failed, ActorKind::Agent, Some(reason));
+}
+
+/// 启动失败分类：缺 Pi 可执行文件 / 缺 provider 模型属于依赖缺失（补齐后可重试）
+/// → blocked；其余（握手失败、session 被拒、prompt 被拒等）→ failed。
+fn start_failure_is_missing_dependency(error: &str) -> bool {
+    error.contains("未找到 Pi")
+        || error.contains("不存在或不可执行")
+        || error.contains("没有可用模型")
+        || error.contains("provider/auth")
 }
 
 /// 最近一次 Pi 进程的 stderr 尾部，用于失败收据定位。
@@ -1438,6 +1506,20 @@ pub async fn agent_start(
     };
     let run_id = input.run_id;
     let root = workspace_root(&state)?;
+    // Work 桥接第一步：Pi 请求成立即落地 durable Work（queued，receipt_ref=run id）。
+    // 创建失败则整个请求失败——没有 durable 记录的 Agent 请求不允许发生。
+    {
+        let mut conn = crate::open_durable_state(&app)?;
+        work::create_work(
+            &mut conn,
+            work::NewWork {
+                workspace_id: Some(crate::workspace_id_for_root(&root)),
+                title: title.clone(),
+                intent: prompt.clone(),
+                receipt_ref: Some(run_id.clone()),
+            },
+        )?;
+    }
     let process = PiProcessState::from_store(Arc::clone(&process.store));
     tauri::async_runtime::spawn_blocking(move || {
         // 状态链：STARTING_PI → PI_READY → SESSION_ALLOCATED → PROMPT_SENT，
@@ -1531,6 +1613,14 @@ pub async fn agent_start(
                     "title": title,
                 }),
             );
+            // Pi 接受请求 → Work running（桥接尽力而为，失败只留痕迹不回滚已发出的请求）
+            transition_run_work(
+                &app,
+                &run_id,
+                WorkStatus::Running,
+                ActorKind::Agent,
+                Some("pi accepted"),
+            );
             Ok(AgentStartResponse {
                 accepted: true,
                 // 不能把 run_id move 进响应：外层失败路径还要用它写收据。
@@ -1551,6 +1641,14 @@ pub async fn agent_start(
                 }
             }
             append_run_receipt(&app, &run_id, Value::Object(fields));
+            // 启动失败 → Work blocked（依赖缺失，可恢复）或 failed（其余致命错误）
+            let message = short_error(error);
+            let status = if start_failure_is_missing_dependency(&message) {
+                WorkStatus::Blocked
+            } else {
+                WorkStatus::Failed
+            };
+            transition_run_work(&app, &run_id, status, ActorKind::Agent, Some(&message));
             return Err(format!(
                 "Agent 启动在 {} 阶段失败：{}",
                 stage.label(),
@@ -1564,7 +1662,10 @@ pub async fn agent_start(
 }
 
 #[tauri::command]
-pub async fn agent_abort(process: State<'_, PiProcessState>) -> Result<AgentAbortResponse, String> {
+pub async fn agent_abort(
+    app: AppHandle,
+    process: State<'_, PiProcessState>,
+) -> Result<AgentAbortResponse, String> {
     let process = PiProcessState::from_store(Arc::clone(&process.store));
     tauri::async_runtime::spawn_blocking(move || {
         let Some(child) = process.current_process() else {
@@ -1600,6 +1701,8 @@ pub async fn agent_abort(process: State<'_, PiProcessState>) -> Result<AgentAbor
         }
         if child.take_run(&run.run_id).is_some() {
             emit_direct_event(&child, &run.run_id, "agent_stopped", None);
+            // abort 成功 → Work cancelled（失败时收据侧仍记录 STOPPED 事实）
+            cancel_run_work(&app, &run.run_id, "用户停止 Agent");
         }
         Ok(AgentAbortResponse {
             accepted: true,
@@ -1733,6 +1836,32 @@ mod tests {
         io::Cursor,
         time::{Instant, SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn start_failure_classification_splits_dependency_from_fatal() {
+        // 依赖缺失 → blocked（补齐 Pi / 模型配置后可重试）
+        for message in [
+            "未找到 Pi：请安装 Pi，或配置 STILLWRITE_PI_EXECUTABLE",
+            "PATH 中的 pi 不存在或不可执行: /usr/bin/pi",
+            "Pi 已启动但没有可用模型；请在 Pi 外部完成 provider/auth 配置",
+        ] {
+            assert!(
+                start_failure_is_missing_dependency(message),
+                "应识别为依赖缺失: {message}"
+            );
+        }
+        // 其余启动失败 → failed
+        for message in [
+            "Pi 启动握手失败: timeout",
+            "Pi 拒绝 Agent 请求: quota exceeded",
+            "创建 Pi session 失败",
+        ] {
+            assert!(
+                !start_failure_is_missing_dependency(message),
+                "应识别为致命错误: {message}"
+            );
+        }
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let nonce = SystemTime::now()

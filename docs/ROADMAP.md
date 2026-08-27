@@ -100,6 +100,8 @@ A0 compatibility contract
 
 `works`、Work semantic events 和 Work projection 属于 A1，不得在 A0 直接改 UI。A2 才把 Pi Run 与 Work/Artifact 连接起来；A3 之后才改变默认导航和启动面。
 
+A1 + A2 已完成（M1，backend-only）：`works` bridge schema（migration v4）、`work://` URI、`work.created / work.status_changed / work.updated` 三个语义事件，以及 Pi 桥接（请求=queued、accepted=running、Artifact 保存=needs_human、abort=cancelled、依赖缺失=blocked、致命错误=failed、人工接受=completed）。Headless Gate：`create → running → attach artifact → needs_human → query → complete → restart` 由 `src-tauri/tests/work_flow.rs` 无 UI 覆盖。UI 不变，Work 视图（M2）必须使用这些真实数据。
+
 ---
 
 ## P2 — Eventize Existing Human Actions
@@ -364,5 +366,7 @@ merge / push / release / replace active version 保留明确人类边界。
 4. 增加 fresh/restart/update/rollback/event atomicity tests；
 5. 不修改 Workbench UI，不改变现有选区问 Agent / 批注 / 搜索 / Library 使用方式；
 6. A1 完成后再进入 A2，不在同一阶段顺手做 Shell 改造。
+
+**状态（2026-08，M1 交付）：** A1 + A2 已按上述边界完成——`works`（migration v4）、`work://` URI、三个 Work 语义事件、Pi→Work 状态桥接与无 UI lifecycle 测试全部落地；UI 未做任何修改，未建 Thread/Run/Artifact 表，历史 Agent Work 未迁移。下一步是 M2：在现有 Agent 区用真实 `works` 数据做 Work 视图（需要你 / 进行中 / 最近完成），不引入 mock 卡片。
 
 完成 A 系列、证明 Work/Run/Artifact 能在一个窗口中被监督后，再进入 Thread、Memory、Library 推荐、RSS 智能或 Self-Evolution。

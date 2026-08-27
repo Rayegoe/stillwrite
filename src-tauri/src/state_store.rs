@@ -33,7 +33,7 @@ pub struct Migration {
 }
 
 /// 当前 schema 版本；测试可以据此构造“旧版本数据库再增量迁移”的场景。
-pub const LATEST_SCHEMA_VERSION: i64 = 3;
+pub const LATEST_SCHEMA_VERSION: i64 = 4;
 
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -154,6 +154,29 @@ pub const MIGRATIONS: &[Migration] = &[
             ON web_search_results(search_id, position);
         CREATE INDEX idx_web_search_results_search
             ON web_search_results(search_id, position);
+        "#,
+    },
+    Migration {
+        version: 4,
+        name: "works",
+        sql: r#"
+        CREATE TABLE works (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT,
+            title        TEXT NOT NULL,
+            intent       TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            summary      TEXT,
+            next_action  TEXT,
+            artifact_uri TEXT,
+            receipt_ref  TEXT,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX idx_works_workspace ON works(workspace_id, id);
+        CREATE INDEX idx_works_status ON works(status);
+        -- 一次运行最多绑定一个 Work；NULL（无运行引用）不参与唯一约束。
+        CREATE UNIQUE INDEX idx_works_receipt ON works(receipt_ref);
         "#,
     },
 ];
@@ -337,6 +360,11 @@ impl ObjectUri {
         ObjectUri(format!("search-result://{result_id}"))
     }
 
+    /// Work 协调对象：`work://<work-id>`。
+    pub fn work(work_id: &str) -> Self {
+        ObjectUri(format!("work://{work_id}"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -369,6 +397,9 @@ pub mod event_action {
     pub const CONTEXT_ATTACHED: &str = "context.attached";
     pub const CONTEXT_DETACHED: &str = "context.detached";
     pub const WEB_SEARCH_COMPLETED: &str = "web_search.completed";
+    pub const WORK_CREATED: &str = "work.created";
+    pub const WORK_STATUS_CHANGED: &str = "work.status_changed";
+    pub const WORK_UPDATED: &str = "work.updated";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1661,6 +1692,7 @@ mod tests {
             "context_items",
             "web_searches",
             "web_search_results",
+            "works",
         ] {
             let n: i64 = conn
                 .query_row(

@@ -17,6 +17,7 @@ mod library;
 mod pi_agent;
 pub mod state_store;
 mod sync;
+pub mod work;
 
 use state_store::ObjectUri;
 
@@ -304,6 +305,11 @@ fn short_hash(bytes: &[u8]) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// opaque workspace key：durable state 不写绝对路径，统一用该 key。
+pub(crate) fn workspace_id_for_root(root: &Path) -> String {
+    short_hash(root.to_string_lossy().as_bytes())
+}
+
 fn resolve_index_db(app: &AppHandle, root: &Path) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -353,7 +359,11 @@ fn activate_workspace(
         return Err("选择的路径不是目录".into());
     }
     validate_workspace_root(&root)?;
-    process.shutdown_for_workspace(&root);
+    // 切换工作区会强制中止 Pi 进程；进行中的 Work 同步转 cancelled，
+    // 不能跨工作区永远停留在 running。
+    if let Some(run_id) = process.shutdown_for_workspace(&root) {
+        pi_agent::cancel_run_work(app, &run_id, "切换工作区，运行被中止");
+    }
 
     let nodes = scan_dir(&root)?;
     {
@@ -997,7 +1007,7 @@ async fn list_library_source_documents(
 // ---------------------------------------------------------------------------
 
 /// 打开当前安装的 durable state 数据库（每次调用短连接，与索引访问方式一致）。
-fn open_durable_state(app: &AppHandle) -> Result<rusqlite::Connection, String> {
+pub(crate) fn open_durable_state(app: &AppHandle) -> Result<rusqlite::Connection, String> {
     let path = state_store::resolve_state_db(app)?;
     state_store::open_state_db(&path)
 }
@@ -1226,10 +1236,10 @@ async fn create_agent_work(
     let run_id = input.run_id.clone();
     let document = agent_work::create(&app, &root, input)?;
     // 状态链最后一环：结果已固化为可编辑的 Agent Work（尽力而为，不影响保存）。
-    if let Some(run_id) = run_id {
+    if let Some(run_id) = &run_id {
         crate::pi_agent::record_run_event(
             &app,
-            &run_id,
+            run_id,
             serde_json::json!({
                 "event": "work_saved",
                 "stage": "WORK_SAVED",
@@ -1237,7 +1247,41 @@ async fn create_agent_work(
             }),
         );
     }
+    // Work 桥接：Artifact 固化后 Work 进入 needs_human，等待人工验收。
+    if let Some(run_id) = run_id.as_deref() {
+        bind_artifact_to_work(&app, &root, run_id, &document)?;
+    }
     Ok(document)
+}
+
+/// 把已保存的 Agent Work Artifact 绑定回本次请求的 durable Work。
+/// `receipt_ref` 找不到 Work 时静默跳过（无 Work 的保存路径不受影响）；
+/// 绑定失败则让命令失败，避免 Work 永远停留在 running。
+fn bind_artifact_to_work(
+    app: &AppHandle,
+    root: &Path,
+    run_id: &str,
+    document: &agent_work::AgentWorkDocument,
+) -> Result<(), String> {
+    let mut conn = open_durable_state(app)?;
+    let Some(work) = work::find_work_by_receipt(&conn, run_id)? else {
+        return Ok(());
+    };
+    let artifact_uri = ObjectUri::parse(&format!(
+        "agentwork://{}/{}",
+        agent_work::workspace_key(root),
+        document.id
+    ))?;
+    work::attach_work_artifact(
+        &mut conn,
+        &work.id,
+        work::AttachArtifact {
+            artifact_uri,
+            summary: None,
+            next_action: Some("等待人工验收".into()),
+        },
+    )
+    .map(|_| ())
 }
 
 /// 保存 Agent 工作文档正文；正文变化不会进入 Workspace 索引或文件树。
