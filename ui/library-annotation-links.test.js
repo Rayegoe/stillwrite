@@ -1,4 +1,5 @@
 const assert = require("assert");
+const Annotations = require("./annotations.js");
 const Links = require("./library-annotation-links.js");
 
 const source = {
@@ -63,5 +64,29 @@ const withOther = Links.syncLinkedItems(first, otherSource, [
 	{ id: "lib-2", quote: "B 原文", note: "B 批注" },
 ]);
 assert.equal(withOther.length, 3, "不同资料的镜像不能互相覆盖");
+
+// 回归：三条资料批注经过完整的 sidecar 序列化/回读后，
+// 每一条都必须仍能解析出资料标题，而不能把 base64 标记泄漏到 UI。
+const three = Links.syncLinkedItems([], source, [
+	{ id: "lib-1", quote: "资料原文一", note: "批注一" },
+	{ id: "lib-2", quote: "资料原文二", note: "批注二" },
+	{ id: "lib-3", quote: "资料原文三", note: "批注三" },
+]);
+const reloaded = Annotations.parse(Annotations.serialize(three));
+assert.equal(reloaded.length, 3, "三条资料批注回读后都应保留");
+assert.equal(new Set(reloaded.map((item) => item.id)).size, 3);
+assert.deepEqual(
+	reloaded.map((item) => Links.parseLinkedNote(item.note)?.meta.title),
+	["A", "A", "A"],
+);
+assert.deepEqual(
+	reloaded.map((item) => Links.parseLinkedNote(item.note)?.note),
+	["批注一", "批注二", "批注三"],
+);
+
+// 容忍旧侧车可能带有 BOM/缩进，避免编码标记直接显示在批注框中。
+const padded = `\uFEFF  ${three[0].note}`;
+assert.equal(Links.parseLinkedNote(padded)?.meta.title, "A");
+assert.equal(Links.parseLinkedNote(three[1].note.replaceAll("\n", "\r\n"))?.meta.title, "A");
 
 console.log("library annotation links tests passed");

@@ -2,7 +2,7 @@
 //!
 //! 与 `indexer.rs` / `library.rs` 的派生索引物理分离：
 //! index.db 里全是可重建的 FTS/trigram，而本模块的表（events / anchors /
-//! relations / context_*）是产品事实，不允许当作 sidecar 删除。
+//! relations / context_* / web_search_*）是产品事实，不允许当作 sidecar 删除。
 //!
 //! 约定：
 //! - durable state 位于应用数据目录下的单个 `state.db`，与 workspace 解耦
@@ -12,7 +12,7 @@
 //! - P1 只建立 primitive 与事务边界，不改 UI、不迁移现有批注/Agent Work；
 //!   P2 的 vertical slice 再逐一接入 Tauri command。
 //!
-//! 事件遵循“宁少勿多”：P1 只定义 relation/context 四个动作常量；
+//! 事件遵循“宁少勿多”：只为已经接入的 durable vertical slice 定义动作常量；
 //! anchors 在批注迁移进 DB 前不产生事件。
 
 use chrono::Utc;
@@ -33,7 +33,7 @@ pub struct Migration {
 }
 
 /// 当前 schema 版本；测试可以据此构造“旧版本数据库再增量迁移”的场景。
-pub const LATEST_SCHEMA_VERSION: i64 = 2;
+pub const LATEST_SCHEMA_VERSION: i64 = 3;
 
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -121,6 +121,39 @@ pub const MIGRATIONS: &[Migration] = &[
         );
         CREATE UNIQUE INDEX idx_context_items_position ON context_items(context_id, position);
         CREATE INDEX idx_context_items_context ON context_items(context_id);
+        "#,
+    },
+    Migration {
+        version: 3,
+        name: "web_search_history",
+        sql: r#"
+        CREATE TABLE web_searches (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id  TEXT,
+            document_uri  TEXT,
+            selected_text TEXT,
+            query         TEXT NOT NULL,
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX idx_web_searches_workspace_created
+            ON web_searches(workspace_id, id);
+        CREATE INDEX idx_web_searches_document_created
+            ON web_searches(document_uri, id);
+
+        CREATE TABLE web_search_results (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            search_id   INTEGER NOT NULL REFERENCES web_searches(id) ON DELETE CASCADE,
+            position    INTEGER NOT NULL,
+            title       TEXT NOT NULL,
+            url         TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            age         TEXT,
+            created_at  TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX idx_web_search_results_position
+            ON web_search_results(search_id, position);
+        CREATE INDEX idx_web_search_results_search
+            ON web_search_results(search_id, position);
         "#,
     },
 ];
@@ -296,6 +329,14 @@ impl ObjectUri {
         ObjectUri(format!("context://{context_set_id}"))
     }
 
+    pub fn web_search(search_id: i64) -> Self {
+        ObjectUri(format!("search://{search_id}"))
+    }
+
+    pub fn web_search_result(result_id: i64) -> Self {
+        ObjectUri(format!("search-result://{result_id}"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -320,12 +361,14 @@ impl std::fmt::Display for ObjectUri {
 // Events
 // ---------------------------------------------------------------------------
 
-/// P1 允许的语义事件。宁少勿多：其余动作等对应 vertical slice 迁移时再加入。
+/// 已接入 durable vertical slice 的语义事件。宁少勿多：其余动作在对应 slice
+/// 迁移时再加入。
 pub mod event_action {
     pub const RELATION_CREATED: &str = "relation.created";
     pub const RELATION_REMOVED: &str = "relation.removed";
     pub const CONTEXT_ATTACHED: &str = "context.attached";
     pub const CONTEXT_DETACHED: &str = "context.detached";
+    pub const WEB_SEARCH_COMPLETED: &str = "web_search.completed";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,6 +492,334 @@ pub fn events_for_object(
         .query_map(params![uri, limit as i64], row_to_event)
         .map_err(|e| format!("查询事件失败: {e}"))?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Web search history
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchHistoryRecord {
+    pub id: i64,
+    pub workspace_id: Option<String>,
+    pub document_uri: Option<String>,
+    pub selected_text: Option<String>,
+    pub query: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewWebSearchResult {
+    pub title: String,
+    pub url: String,
+    pub description: String,
+    pub age: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewWebSearch {
+    pub workspace_id: Option<String>,
+    pub document_uri: Option<ObjectUri>,
+    pub selected_text: Option<String>,
+    pub query: String,
+    pub results: Vec<NewWebSearchResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchResultRecord {
+    pub id: i64,
+    pub search_id: i64,
+    pub position: i64,
+    pub title: String,
+    pub url: String,
+    pub description: String,
+    pub age: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchHistoryView {
+    pub id: i64,
+    pub workspace_id: Option<String>,
+    pub document_uri: Option<String>,
+    pub selected_text: Option<String>,
+    pub query: String,
+    pub created_at: String,
+    pub results: Vec<WebSearchResultRecord>,
+}
+
+fn row_to_web_search_history(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebSearchHistoryRecord> {
+    Ok(WebSearchHistoryRecord {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        document_uri: row.get(2)?,
+        selected_text: row.get(3)?,
+        query: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+fn row_to_web_search_result(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebSearchResultRecord> {
+    Ok(WebSearchResultRecord {
+        id: row.get(0)?,
+        search_id: row.get(1)?,
+        position: row.get(2)?,
+        title: row.get(3)?,
+        url: row.get(4)?,
+        description: row.get(5)?,
+        age: row.get(6)?,
+        created_at: row.get(7)?,
+    })
+}
+
+fn get_web_search_record(
+    conn: &Connection,
+    search_id: i64,
+) -> Result<Option<WebSearchHistoryRecord>, String> {
+    conn.query_row(
+        "SELECT id, workspace_id, document_uri, selected_text, query, created_at
+         FROM web_searches WHERE id = ?1",
+        params![search_id],
+        row_to_web_search_history,
+    )
+    .optional()
+    .map_err(|e| format!("查询网页搜索历史失败: {e}"))
+}
+
+fn list_web_search_results(
+    conn: &Connection,
+    search_id: i64,
+) -> Result<Vec<WebSearchResultRecord>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, search_id, position, title, url, description, age, created_at
+             FROM web_search_results WHERE search_id = ?1 ORDER BY position ASC",
+        )
+        .map_err(|e| format!("查询网页搜索结果失败: {e}"))?;
+    let rows = stmt
+        .query_map(params![search_id], row_to_web_search_result)
+        .map_err(|e| format!("查询网页搜索结果失败: {e}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| format!("读取网页搜索结果失败: {e}"))
+}
+
+pub fn get_web_search(
+    conn: &Connection,
+    search_id: i64,
+) -> Result<Option<WebSearchHistoryView>, String> {
+    let Some(history) = get_web_search_record(conn, search_id)? else {
+        return Ok(None);
+    };
+    let results = list_web_search_results(conn, search_id)?;
+    Ok(Some(WebSearchHistoryView {
+        id: history.id,
+        workspace_id: history.workspace_id,
+        document_uri: history.document_uri,
+        selected_text: history.selected_text,
+        query: history.query,
+        created_at: history.created_at,
+        results,
+    }))
+}
+
+pub fn list_web_search_history(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<WebSearchHistoryView>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, workspace_id, document_uri, selected_text, query, created_at
+             FROM web_searches
+             WHERE (?1 IS NULL OR workspace_id = ?1)
+             ORDER BY id DESC LIMIT ?2",
+        )
+        .map_err(|e| format!("查询网页搜索历史失败: {e}"))?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, limit as i64],
+            row_to_web_search_history,
+        )
+        .map_err(|e| format!("查询网页搜索历史失败: {e}"))?;
+    let histories = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| format!("读取网页搜索历史失败: {e}"))?;
+    histories
+        .into_iter()
+        .map(|history| {
+            let results = list_web_search_results(conn, history.id)?;
+            Ok(WebSearchHistoryView {
+                id: history.id,
+                workspace_id: history.workspace_id,
+                document_uri: history.document_uri,
+                selected_text: history.selected_text,
+                query: history.query,
+                created_at: history.created_at,
+                results,
+            })
+        })
+        .collect()
+}
+
+fn create_web_search_in_tx(
+    tx: &Transaction,
+    input: NewWebSearch,
+) -> Result<WebSearchHistoryView, String> {
+    let NewWebSearch {
+        workspace_id,
+        document_uri,
+        selected_text,
+        query,
+        results,
+    } = input;
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Err("网页搜索历史缺少 query".into());
+    }
+    if results.len() > 100 {
+        return Err("网页搜索结果数量超过限制".into());
+    }
+    let selected_text = selected_text.and_then(|text| {
+        let trimmed = text.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+    let created_at = now_iso();
+    tx.execute(
+        "INSERT INTO web_searches
+            (workspace_id, document_uri, selected_text, query, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            workspace_id,
+            document_uri.as_ref().map(ObjectUri::as_str),
+            selected_text,
+            query,
+            created_at,
+        ],
+    )
+    .map_err(|e| format!("写入网页搜索历史失败: {e}"))?;
+    let search_id = tx.last_insert_rowid();
+    for (position, result) in results.iter().enumerate() {
+        let title = result.title.trim();
+        let url = result.url.trim();
+        if title.is_empty() {
+            return Err("网页搜索结果缺少标题".into());
+        }
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(format!("网页搜索结果 URL 非法: {url}"));
+        }
+        tx.execute(
+            "INSERT INTO web_search_results
+                (search_id, position, title, url, description, age, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                search_id,
+                position as i64,
+                title,
+                url,
+                result.description.trim(),
+                result
+                    .age
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|age| !age.is_empty()),
+                created_at,
+            ],
+        )
+        .map_err(|e| format!("写入网页搜索结果失败: {e}"))?;
+    }
+
+    let mut payload = serde_json::json!({
+        "query": query,
+        "result_count": results.len(),
+    });
+    if let Some(selected_text) = selected_text.as_deref() {
+        payload["selected_text"] = serde_json::Value::String(selected_text.to_string());
+    }
+    append_event(
+        tx,
+        NewEvent {
+            action: event_action::WEB_SEARCH_COMPLETED.to_string(),
+            workspace_id: workspace_id.clone(),
+            object_uri: Some(ObjectUri::web_search(search_id)),
+            target_uri: document_uri.clone(),
+            payload: Some(payload),
+            ..NewEvent::default()
+        },
+    )?;
+    get_web_search(tx, search_id)?.ok_or_else(|| "回读网页搜索历史失败".into())
+}
+
+pub fn create_web_search(
+    conn: &mut Connection,
+    input: NewWebSearch,
+) -> Result<WebSearchHistoryView, String> {
+    tx_command(conn, move |tx| create_web_search_in_tx(tx, input))
+}
+
+pub fn get_web_search_result(
+    conn: &Connection,
+    result_id: i64,
+) -> Result<Option<(WebSearchHistoryView, WebSearchResultRecord)>, String> {
+    let search_id: Option<i64> = conn
+        .query_row(
+            "SELECT search_id FROM web_search_results WHERE id = ?1",
+            params![result_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("查询网页搜索结果归属失败: {e}"))?;
+    let Some(search_id) = search_id else {
+        return Ok(None);
+    };
+    let Some(history) = get_web_search(conn, search_id)? else {
+        return Ok(None);
+    };
+    let result = history
+        .results
+        .iter()
+        .find(|item| item.id == result_id)
+        .cloned();
+    let Some(result) = result else {
+        return Ok(None);
+    };
+    Ok(Some((history, result)))
+}
+
+/// 查询某篇笔记已经关联的网页搜索结果 ID。
+///
+/// `relations` 本身沿用跨域 URI 模型，没有重复存 workspace_id；查询时通过
+/// search-result 的所属历史回连 workspace，避免两个工作区使用同一相对路径时串出关联。
+pub fn web_search_result_links(
+    conn: &Connection,
+    source_uri: &str,
+    workspace_id: Option<&str>,
+) -> Result<Vec<i64>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT r.target_uri
+             FROM relations r
+             JOIN web_search_results sr
+               ON sr.id = CAST(substr(r.target_uri, 17) AS INTEGER)
+             JOIN web_searches ws ON ws.id = sr.search_id
+             WHERE r.source_uri = ?1 AND r.predicate = 'related_to'
+               AND r.target_uri LIKE 'search-result://%'
+               AND (?2 IS NULL OR ws.workspace_id = ?2)
+             ORDER BY r.id ASC",
+        )
+        .map_err(|e| format!("查询网页搜索关联失败: {e}"))?;
+    let rows = stmt
+        .query_map(params![source_uri, workspace_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|e| format!("查询网页搜索关联失败: {e}"))?;
+    let ids = rows
+        .filter_map(|row| row.ok())
+        .filter_map(|uri| uri.strip_prefix("search-result://")?.parse::<i64>().ok())
+        .collect::<Vec<_>>();
+    Ok(ids)
 }
 
 // ---------------------------------------------------------------------------
@@ -822,9 +1193,13 @@ pub fn find_relation(
     let sql = format!(
         "SELECT {RELATION_COLUMNS} FROM relations WHERE source_uri = ?1 AND predicate = ?2 AND target_uri = ?3"
     );
-    conn.query_row(&sql, params![source_uri, predicate, target_uri], row_to_relation)
-        .optional()
-        .map_err(|e| format!("查询 relation 失败: {e}"))
+    conn.query_row(
+        &sql,
+        params![source_uri, predicate, target_uri],
+        row_to_relation,
+    )
+    .optional()
+    .map_err(|e| format!("查询 relation 失败: {e}"))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -874,16 +1249,11 @@ pub fn list_relation_snapshots(
                     .map_err(|e| format!("读取证据事件失败: {e}"))?;
                 payload_json
                     .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
-                    .and_then(|payload| {
-                        payload.get("snapshot").cloned().filter(|s| !s.is_null())
-                    })
+                    .and_then(|payload| payload.get("snapshot").cloned().filter(|s| !s.is_null()))
             }
             None => None,
         };
-        views.push(PinnedRelationView {
-            relation,
-            snapshot,
-        });
+        views.push(PinnedRelationView { relation, snapshot });
     }
     Ok(views)
 }
@@ -1289,6 +1659,8 @@ mod tests {
             "relations",
             "context_sets",
             "context_items",
+            "web_searches",
+            "web_search_results",
         ] {
             let n: i64 = conn
                 .query_row(
@@ -1425,6 +1797,114 @@ mod tests {
         let by_object = events_for_object(&conn, "workspace://notes.md", 10).unwrap();
         assert_eq!(by_object.len(), 1);
         assert_eq!(by_object[0].id, 1);
+    }
+
+    #[test]
+    fn web_search_history_roundtrips_with_results_and_links() {
+        let (dir, mut conn) = open_fresh();
+        let document = ObjectUri::workspace("notes/search.md").unwrap();
+        let history = create_web_search(
+            &mut conn,
+            NewWebSearch {
+                workspace_id: Some("ws-search".into()),
+                document_uri: Some(document.clone()),
+                selected_text: Some("上下文工程".into()),
+                query: "上下文工程 durable state".into(),
+                results: vec![
+                    NewWebSearchResult {
+                        title: "StillWrite context state".into(),
+                        url: "https://example.com/context".into(),
+                        description: "A durable search result snapshot".into(),
+                        age: Some("2 days ago".into()),
+                    },
+                    NewWebSearchResult {
+                        title: "SQLite events".into(),
+                        url: "https://example.com/events".into(),
+                        description: "Append-only evidence".into(),
+                        age: None,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        assert_eq!(history.results.len(), 2);
+        assert_eq!(history.results[0].position, 0);
+        assert_eq!(history.results[1].url, "https://example.com/events");
+
+        let linked_result = &history.results[0];
+        create_relation(
+            &mut conn,
+            NewRelation {
+                source_uri: document.clone(),
+                predicate: "related_to".into(),
+                target_uri: ObjectUri::web_search_result(linked_result.id),
+                anchor_id: None,
+                created_by: Some("human".into()),
+                confidence: None,
+                workspace_id: Some("ws-search".into()),
+                snapshot: Some(serde_json::json!({"title": linked_result.title})),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            web_search_result_links(&conn, document.as_str(), Some("ws-search")).unwrap(),
+            vec![linked_result.id]
+        );
+
+        let other_history = create_web_search(
+            &mut conn,
+            NewWebSearch {
+                workspace_id: Some("ws-other".into()),
+                document_uri: Some(document.clone()),
+                selected_text: None,
+                query: "other workspace".into(),
+                results: vec![NewWebSearchResult {
+                    title: "Other workspace result".into(),
+                    url: "https://example.com/other".into(),
+                    description: "Must stay scoped to its workspace".into(),
+                    age: None,
+                }],
+            },
+        )
+        .unwrap();
+        let other_result = &other_history.results[0];
+        create_relation(
+            &mut conn,
+            NewRelation {
+                source_uri: document.clone(),
+                predicate: "related_to".into(),
+                target_uri: ObjectUri::web_search_result(other_result.id),
+                anchor_id: None,
+                created_by: Some("human".into()),
+                confidence: None,
+                workspace_id: Some("ws-other".into()),
+                snapshot: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            web_search_result_links(&conn, document.as_str(), Some("ws-search")).unwrap(),
+            vec![linked_result.id]
+        );
+        assert_eq!(
+            web_search_result_links(&conn, document.as_str(), Some("ws-other")).unwrap(),
+            vec![other_result.id]
+        );
+
+        let reopened = reopen(&dir);
+        let histories = list_web_search_history(&reopened, Some("ws-search"), 10).unwrap();
+        assert_eq!(histories.len(), 1);
+        assert_eq!(histories[0].query, "上下文工程 durable state");
+        assert_eq!(histories[0].results.len(), 2);
+        assert_eq!(
+            histories[0].document_uri.as_deref(),
+            Some(document.as_str())
+        );
+        let events = list_events(&reopened, 10).unwrap();
+        assert!(events.iter().any(|event| {
+            event.action == event_action::WEB_SEARCH_COMPLETED
+                && event.object_uri.as_deref() == Some(ObjectUri::web_search(history.id).as_str())
+        }));
     }
 
     #[test]
@@ -1742,9 +2222,11 @@ mod tests {
         let found = find_relation(&conn, scope.as_str(), "related_to", target_a.as_str())
             .unwrap()
             .expect("刚创建的关系必须能被三元组查回");
-        assert!(find_relation(&conn, scope.as_str(), "contradicts", target_a.as_str())
-            .unwrap()
-            .is_none());
+        assert!(
+            find_relation(&conn, scope.as_str(), "contradicts", target_a.as_str())
+                .unwrap()
+                .is_none()
+        );
 
         let views = list_relation_snapshots(&conn, scope.as_str(), "related_to").unwrap();
         assert_eq!(views.len(), 2);
@@ -1752,7 +2234,8 @@ mod tests {
         // 展示快照原样从证据事件还原
         assert_eq!(views[0].snapshot.as_ref(), Some(&card));
         assert_eq!(
-            views[1].relation.target_uri, target_b.as_str(),
+            views[1].relation.target_uri,
+            target_b.as_str(),
             "按创建顺序返回"
         );
         // 未携带快照的关系返回 None 而不是报错
@@ -1760,9 +2243,11 @@ mod tests {
 
         // 删除后 find 归零、视图同步减少
         remove_relation(&mut conn, found.id).unwrap();
-        assert!(find_relation(&conn, scope.as_str(), "related_to", target_a.as_str())
-            .unwrap()
-            .is_none());
+        assert!(
+            find_relation(&conn, scope.as_str(), "related_to", target_a.as_str())
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             list_relation_snapshots(&conn, scope.as_str(), "related_to")
                 .unwrap()

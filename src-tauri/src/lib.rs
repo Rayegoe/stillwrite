@@ -697,10 +697,13 @@ async fn search_web(
     app: AppHandle,
     query: String,
     count: Option<usize>,
-) -> Result<Vec<WebSearchHit>, String> {
+    document_uri: Option<String>,
+    selected_text: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<state_store::WebSearchHistoryView, String> {
     let query = query.trim().to_owned();
     if query.is_empty() {
-        return Ok(Vec::new());
+        return Err("网页搜索 query 不能为空".into());
     }
     let api_key = brave_api_key(&app)?;
     let count = count.unwrap_or(10).clamp(1, 20);
@@ -741,7 +744,141 @@ async fn search_web(
             .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
         return Err(format!("Brave 搜索失败: {detail}"));
     }
-    parse_brave_web_results(&body)
+    let hits = parse_brave_web_results(&body)?;
+    let document_uri = document_uri.as_deref().map(ObjectUri::parse).transpose()?;
+    let workspace_id = workspace_root(&state)
+        .ok()
+        .map(|root| short_hash(root.to_string_lossy().as_bytes()));
+    let results = hits
+        .into_iter()
+        .map(|hit| state_store::NewWebSearchResult {
+            title: hit.title,
+            url: hit.url,
+            description: hit.description,
+            age: hit.age,
+        })
+        .collect();
+    let mut conn = open_durable_state(&app)?;
+    state_store::create_web_search(
+        &mut conn,
+        state_store::NewWebSearch {
+            workspace_id,
+            document_uri,
+            selected_text,
+            query,
+            results,
+        },
+    )
+}
+
+#[tauri::command]
+async fn list_web_search_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<state_store::WebSearchHistoryView>, String> {
+    let workspace_id = workspace_root(&state)
+        .ok()
+        .map(|root| short_hash(root.to_string_lossy().as_bytes()));
+    let conn = open_durable_state(&app)?;
+    state_store::list_web_search_history(
+        &conn,
+        workspace_id.as_deref(),
+        limit.unwrap_or(50).clamp(1, 200),
+    )
+}
+
+fn parse_search_relation_source(source_uri: &str) -> Result<ObjectUri, String> {
+    let source = ObjectUri::parse(source_uri.trim())?;
+    match source.scheme() {
+        "workspace" | "library" | "agent" => Ok(source),
+        _ => Err("搜索结果只能关联到当前文档".into()),
+    }
+}
+
+#[tauri::command]
+async fn list_search_result_links(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source_uri: String,
+) -> Result<Vec<i64>, String> {
+    let source = parse_search_relation_source(&source_uri)?;
+    let workspace_id = workspace_root(&state)
+        .ok()
+        .map(|root| short_hash(root.to_string_lossy().as_bytes()));
+    let conn = open_durable_state(&app)?;
+    state_store::web_search_result_links(&conn, source.as_str(), workspace_id.as_deref())
+}
+
+#[tauri::command]
+async fn link_search_result(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source_uri: String,
+    result_id: i64,
+) -> Result<(), String> {
+    let source = parse_search_relation_source(&source_uri)?;
+    let root = workspace_root(&state)?;
+    let workspace_id = short_hash(root.to_string_lossy().as_bytes());
+    let mut conn = open_durable_state(&app)?;
+    let Some((history, result)) = state_store::get_web_search_result(&conn, result_id)? else {
+        return Err("网页搜索结果不存在".into());
+    };
+    if history.workspace_id.as_deref() != Some(workspace_id.as_str()) {
+        return Err("网页搜索结果不属于当前工作区".into());
+    }
+    let target = ObjectUri::web_search_result(result.id);
+    let snapshot = serde_json::json!({
+        "key": format!("search-result:{}", result.id),
+        "kind": "web-search",
+        "title": result.title,
+        "snippet": result.description,
+        "source": result.url.clone(),
+        "url": result.url,
+        "search_id": history.id,
+        "query": history.query,
+    });
+    match state_store::create_relation(
+        &mut conn,
+        state_store::NewRelation {
+            source_uri: source,
+            predicate: "related_to".into(),
+            target_uri: target,
+            anchor_id: None,
+            created_by: Some("human".into()),
+            confidence: None,
+            workspace_id: Some(workspace_id),
+            snapshot: Some(snapshot),
+        },
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) if error.contains("相同的关联已存在") => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+async fn unlink_search_result(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source_uri: String,
+    result_id: i64,
+) -> Result<(), String> {
+    let source = parse_search_relation_source(&source_uri)?;
+    let root = workspace_root(&state)?;
+    let workspace_id = short_hash(root.to_string_lossy().as_bytes());
+    let target = ObjectUri::web_search_result(result_id);
+    let mut conn = open_durable_state(&app)?;
+    let Some((history, _)) = state_store::get_web_search_result(&conn, result_id)? else {
+        return Ok(());
+    };
+    if history.workspace_id.as_deref() != Some(workspace_id.as_str()) {
+        return Err("网页搜索结果不属于当前工作区".into());
+    }
+    match state_store::find_relation(&conn, source.as_str(), "related_to", target.as_str())? {
+        Some(relation) => state_store::remove_relation(&mut conn, relation.id),
+        None => Ok(()),
+    }
 }
 
 #[tauri::command]
@@ -1278,6 +1415,10 @@ pub fn run() {
             save_brave_api_key,
             clear_brave_api_key,
             search_web,
+            list_web_search_history,
+            list_search_result_links,
+            link_search_result,
+            unlink_search_result,
             search_related_index,
             add_library_source,
             refresh_library,

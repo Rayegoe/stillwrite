@@ -105,6 +105,7 @@
 - [ ] annotation metadata → SQLite
 - [ ] selection anchors → SQLite
 - [x] related pinned items → relations（P2a 已完成：`ws://<workspace-key>` scope + 幂等 legacy 导入）
+- [x] web search history/results → SQLite（P2c：Brave 快照、历史展开、网页结果关联当前笔记）
 - [ ] citation basket → context sets
 - [ ] Agent Work metadata → thread/turn/work
 - [ ] Agent history → turns

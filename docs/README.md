@@ -55,7 +55,7 @@ StillWrite 要做的是：
 
 `问 Agent` 是上下文动作，因此不需要再在右上工具栏保留一个重复入口。
 
-左下角齿轮“设置”用于填写 Brave Search API Key；密钥由后端保存到应用数据目录，未保存设置时也可使用 `BRAVE_SEARCH_API_KEY` 环境变量。
+左下角齿轮“设置”用于填写 Brave Search API Key；每次互联网搜索都会成为右侧支持栏“搜索”视图中的历史条目，与“批注”“关联”并列。点开历史条目即可展开已写入 `state.db` 的结果快照，结果可重新打开网页或关联当前笔记。密钥由后端保存到应用数据目录，未保存设置时也可使用 `BRAVE_SEARCH_API_KEY` 环境变量。
 
 ## 不再用“模块”组织产品
 
@@ -209,6 +209,7 @@ External World / Human Activity / Agent Runs
 - anchors
 - annotations metadata
 - relations
+- web search history / result snapshots
 - context sets
 - threads / turns / runs
 - memories

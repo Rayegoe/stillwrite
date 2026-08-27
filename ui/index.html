@@ -65,26 +65,12 @@
           <span class="sync-state" id="syncState" hidden></span>
           <span class="save-state" id="saveState">就绪</span>
           <button
-            class="text-btn ask-agent-btn"
-            id="askAgentButton"
-            title="围绕当前文档或选区询问 Agent"
-          >
-            问 Agent
-          </button>
-          <button
             class="text-btn annotate-btn"
             id="annotationButton"
-            title="为选中的字句添加批注 (Ctrl+Shift+M)"
+            title="有选区时新建批注，否则切换批注栏 (Ctrl+Shift+M)"
+            aria-label="批注：新建或切换批注栏"
           >
-            ＋ 批注
-          </button>
-          <button
-            class="text-btn related-btn"
-            id="relatedButton"
-            title="查看当前作品的关联材料"
-            hidden
-          >
-            关联 <span id="relatedToolbarCount">0</span>
+            ☰
           </button>
           <div class="segmented" aria-label="视图模式">
             <button data-view="editor" title="仅写作 (Ctrl+1)">写</button>
@@ -265,6 +251,16 @@
               >
                 关联 <span class="annotate-count" id="relatedCount">0</span>
               </button>
+              <button
+                class="support-view-tab"
+                id="webSearchViewButton"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="webSearchStream"
+              >
+                搜索 <span class="annotate-count" id="webSearchCount">0</span>
+              </button>
             </div>
             <div class="annotate-actions">
               <button
@@ -320,6 +316,11 @@
             <div class="annotation-list" id="annotationList" role="list"></div>
           </div>
           <div class="related-stream" id="relatedStream" hidden></div>
+          <div
+            class="related-stream web-search-stream"
+            id="webSearchStream"
+            hidden
+          ></div>
           <div class="annotate-foot" id="annotateFooter">
             <span id="annotateFoot">批注保存在「批注/」，随文档同步。</span>
             <button

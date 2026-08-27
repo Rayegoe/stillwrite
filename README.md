@@ -95,7 +95,7 @@ Library 的目标边界是：`Library ≠ Workspace`、`Index ≠ Content`。引
 Agent 不是右侧常驻聊天框，而是由文档选区触发、最终落成 Markdown 的工作文档：
 
 - 侧栏现在有 `文件 / 资料 / Agent` 三个平面；`Agent` 列表只显示工作标题、来源选区和运行状态，不把 Workspace 文件树或 Library 展开成第二棵目录树。
-- 在阅读区选中文字后，浮层会同时提供 `＋批注`、`问 Agent` 和 `联网搜索`。工具栏里的 `问 Agent` 也可围绕当前段落发起请求；`Agent` 侧栏的 `＋` 用于新建独立工作。
+- 在阅读区选中文字后，浮层会同时提供 `＋批注`、`问 Agent` 和 `联网搜索`。顶栏的 `☰` 图标只负责右侧批注栏显隐；`Agent` 侧栏的 `＋` 用于新建独立工作。
 - Agent 结果保存为当前 Workspace 对应的独立 Markdown 工作文档，正文在 StillWrite 应用数据目录，不进入 Workspace 文件树、git 或 Library。打开后与其他文档共用同一个编辑器、阅读区、选区、高亮和批注系统。
 - Agent 工作的来源选区、请求和 Pi session 相对引用只保存在最小 JSON 侧车；正文仍是 Markdown。工作运行时列表显示状态，完成后用户点击列表项再打开结果，不打断当前写作。
 - StillWrite 通过本机 Pi 的 `--mode rpc` 持久进程运行 Agent；一个 Workspace 对应一个 Pi 进程和独立 session 目录。流式预览只留在 Agent 列表，只有收到权威最终文本后才保存一次 Agent Work。

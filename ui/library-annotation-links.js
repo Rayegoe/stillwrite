@@ -11,8 +11,14 @@
 
 	function encodeMeta(value) {
 		const json = JSON.stringify(value);
-		if (typeof Buffer !== "undefined")
-			return Buffer.from(json, "utf8").toString("base64url");
+		if (typeof Buffer !== "undefined" && typeof Buffer.from === "function") {
+			try {
+				const encoded = Buffer.from(json, "utf8").toString("base64url");
+				// 某些 WebView 注入的 Buffer 只支持 base64，不能让“+ / =”
+				// 进入标记行，否则浏览器侧的严格解析会把它当成普通批注。
+				if (/^[A-Za-z0-9_-]+$/.test(encoded)) return encoded;
+			} catch (_) {}
+		}
 		const bytes = new TextEncoder().encode(json);
 		let binary = "";
 		bytes.forEach((byte) => {
@@ -26,9 +32,16 @@
 
 	function decodeMeta(value) {
 		try {
-			if (typeof Buffer !== "undefined")
-				return JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-			const padded = value.replaceAll("-", "+").replaceAll("_", "/");
+			if (typeof Buffer !== "undefined" && typeof Buffer.from === "function") {
+				const decoded = JSON.parse(
+					Buffer.from(value, "base64url").toString("utf8"),
+				);
+				if (decoded && typeof decoded === "object") return decoded;
+			}
+		} catch (_) {}
+		try {
+			const normalized = String(value || "");
+			const padded = normalized.replaceAll("-", "+").replaceAll("_", "/");
 			const binary = atob(padded.padEnd(Math.ceil(padded.length / 4) * 4, "="));
 			const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
 			return JSON.parse(new TextDecoder().decode(bytes));
@@ -42,7 +55,12 @@
 	}
 
 	function parseLinkedNote(note) {
-		const text = String(note || "");
+		// AnnotationCodec 会 trim 正常数据；这里仍容忍 BOM/缩进，避免旧数据
+		// 因为一个不可见字符而退化成把编码标记展示给用户。
+		const text = String(note || "")
+			.replace(/^\uFEFF/, "")
+			.replace(/\r\n?/g, "\n")
+			.trimStart();
 		if (!text.startsWith(LINK_PREFIX)) return null;
 		const firstLineEnd = text.indexOf("\n");
 		const firstLine = firstLineEnd >= 0 ? text.slice(0, firstLineEnd) : text;
@@ -145,7 +163,7 @@
 			}
 		}
 
-		async function syncLibraryAnnotationsToWritingAnchor() {
+		async function syncLibraryAnnotationsToWritingAnchor(libraryItems) {
 			if (!writingAnchor?.path || !currentLibraryDocument) return false;
 			const source = {
 				uri: currentLibraryDocument.uri,
@@ -158,7 +176,7 @@
 				const target = { kind: "workspace", path: writingAnchor.path };
 				const data = await invoke("read_annotation", { target });
 				const existing = codec.parse(data.body || "", data.updated_at || "");
-				const merged = syncLinkedItems(existing, source, annotationItems);
+				const merged = syncLinkedItems(existing, source, libraryItems);
 				await invoke("save_annotation", {
 					target,
 					body: codec.serialize(merged),
@@ -174,11 +192,21 @@
 		}
 
 		const originalSaveAnnotate = saveAnnotate;
-		saveAnnotate = async function () {
-			const target = currentDocumentRef();
-			const librarySave = target?.kind === "library";
-			await originalSaveAnnotate();
-			if (librarySave && !annotateDirty) await syncLibraryAnnotationsToWritingAnchor();
+		let saveChain = Promise.resolve();
+		saveAnnotate = function () {
+			// addPendingAnnotation/saveAnnotate 不在调用方 await。把“资料侧车保存”
+			// 与“写作区镜像回写”放进同一条队列，避免较早的空/少量快照最后写回，
+			// 从而覆盖后来已经完成的批注。
+			const operation = saveChain.catch(() => {}).then(async () => {
+				const target = currentDocumentRef();
+				const librarySave = target?.kind === "library";
+				const libraryItems = annotationItems.map((item) => ({ ...item }));
+				await originalSaveAnnotate();
+				if (librarySave && !annotateDirty)
+					await syncLibraryAnnotationsToWritingAnchor(libraryItems);
+			});
+			saveChain = operation.catch(() => {});
+			return operation;
 		};
 
 		const originalRenderAnnotationPanel = renderAnnotationPanel;

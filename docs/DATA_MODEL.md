@@ -12,6 +12,7 @@
 | Annotation metadata | SQLite durable |
 | Relations | SQLite durable |
 | Context | SQLite durable |
+| Web search history / result snapshots | SQLite durable |
 | Threads / turns | SQLite durable |
 | Work | SQLite durable |
 | Memory | SQLite durable |
@@ -130,6 +131,10 @@ created_at
 ```
 
 Current citation basket is migrated here.
+
+### web_searches / web_search_results
+
+每次 Brave 互联网搜索都是一条可重读的 `web_searches` 历史记录；返回的标题、URL、摘要和时间信息以快照写入 `web_search_results`，不依赖再次请求互联网。网页结果可通过通用 `relations` 以 `search-result://<id>` 作为 target 关联到当前笔记。
 
 ### agent_threads
 
@@ -250,7 +255,7 @@ Derived data must be rebuildable from durable state/artifacts.
 
 vNext P1 已建立独立于派生索引的 durable 数据库，位置为 `<AppData>/state.db`（`src-tauri/src/state_store.rs`）：
 
-- 物理边界：durable（state.db：schema_migrations / events / anchors / relations / context_sets / context_items）与 derived（indexer/library 的 index.db）分文件存放。派生索引可整库删除重建，durable 数据不允许；
+- 物理边界：durable（state.db：schema_migrations / events / anchors / relations / context_sets / context_items / web_searches / web_search_results）与 derived（indexer/library 的 index.db）分文件存放。派生索引可整库删除重建，durable 数据不允许；
 - migration runner 按版本递增应用 `MIGRATIONS`，每版本一个事务；重启即 no-op；
 - events 通过 SQLite trigger 物理禁止 UPDATE/DELETE（append-only），写入只发生在命令事务内；
 - command transaction pattern：所有状态变更经 `tx_command` 在同一事务内完成 mutate + append event；复合命令直接组合 `*_in_tx` 级别函数（见 `tests/state_flow.rs`）；
@@ -259,6 +264,7 @@ vNext P1 已建立独立于派生索引的 durable 数据库，位置为 `<AppDa
 - `relation.removed` 事件 payload 携带完整快照（predicate / source_uri / target_uri / removed_evidence_event_id）——relation 行删除后不可查询，撤销审计只能依赖事件本身；
 - URI 经 `ObjectUri` 统一校验后入库（`workspace://` `library://` `anchor://` 等 validated wrapper，不做封闭 enum）；
 - **P2a 固定关联已迁移**（第一个 vertical slice）：用户的 ☆固定/取消固定 不再写入 `localStorage['stillwrite.relatedPinned.v1']`，改经 `pin_related / unpin_related / list_related_pins / import_related_pins` 命令落入 relations + events。作用域与旧 UI 一致为工作区级共享，建模为 `ws://<workspace-key>` 根对象（key 复用 index 目录的 short_hash）；卡片展示快照存在 `relation.created` 事件 payload 的 `snapshot` 字段里；legacy 值按工作区前缀分批幂等导入、校验投影后才移除（重复启动不产生重复关系或事件）；
+- **P2c 网页搜索已持久化**：`search_web` 在 Brave 返回后把搜索历史和结果快照原子写入 `web_searches / web_search_results`，并追加 `web_search.completed` 事件；右侧“搜索”视图按历史条目展示，点击后展开结果，结果可打开网页或通过 `relations` 关联当前笔记。
 - 尚未迁移：annotations metadata、agent threads/turns/runs、works、memories、sources——各自对应的 vertical slice 迁移时再接入同一套事务模式。
 
 ## 4. Transaction Rule

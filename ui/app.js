@@ -49,8 +49,6 @@ const fileMenuRoot = document.querySelector("#fileMenuRoot");
 const fileMenuButton = document.querySelector("#fileMenuButton");
 const fileMenu = document.querySelector("#fileMenu");
 const annotationButton = document.querySelector("#annotationButton");
-const relatedButton = document.querySelector("#relatedButton");
-const relatedToolbarCount = document.querySelector("#relatedToolbarCount");
 const annotatePanel = document.querySelector("#annotatePanel");
 const annotateHandle = document.querySelector("#annotateHandle");
 const closeAnnotate = document.querySelector("#closeAnnotate");
@@ -60,11 +58,14 @@ const annotateDocName = document.querySelector("#annotateDocName");
 const annotateDocPath = document.querySelector("#annotateDocPath");
 const annotateCount = document.querySelector("#annotateCount");
 const relatedCount = document.querySelector("#relatedCount");
+const webSearchCount = document.querySelector("#webSearchCount");
 const annotationViewButton = document.querySelector("#annotationViewButton");
 const relatedViewButton = document.querySelector("#relatedViewButton");
+const webSearchViewButton = document.querySelector("#webSearchViewButton");
 const annotateHint = document.querySelector("#annotateHint");
 const annotateStream = document.querySelector("#annotateStream");
 const relatedStream = document.querySelector("#relatedStream");
+const webSearchStream = document.querySelector("#webSearchStream");
 const annotateFooter = document.querySelector("#annotateFooter");
 const annotationList = document.querySelector("#annotationList");
 const annotationEmpty = document.querySelector("#annotationEmpty");
@@ -85,7 +86,6 @@ const AnnotationCodec = window.StillwriteAnnotations;
 const DocumentLinks = window.StillwriteDocumentLinks;
 const AgentEvents = window.StillwriteAgentEvents;
 const Feeds = window.StillwriteFeeds;
-const askAgentButton = document.querySelector("#askAgentButton");
 const agentAskDialog = document.querySelector("#agentAskDialog");
 const agentAskForm = document.querySelector("#agentAskForm");
 const agentAskTitle = document.querySelector("#agentAskTitle");
@@ -154,6 +154,10 @@ let relatedRequestToken = 0;
 let relatedSeedFingerprint = "";
 let relatedHasSearched = false;
 let relatedSupplementSeeds = [];
+let webSearchHistory = [];
+const expandedWebSearchIds = new Set();
+const linkedWebSearchResultIds = new Set();
+let webSearchMessage = "";
 const RELATED_PIN_STORAGE_KEY = "stillwrite.relatedPinned.v1";
 const RELATED_PIN_SCOPE_SEPARATOR = "\u001f";
 // 固定关联的 durable 事实在 state.db（relations + events）；
@@ -166,6 +170,7 @@ let autoSync = false; // 首次手动同步成功后开启自动同步
 let syncTimer = null;
 let searchTimer = null;
 let webSearchRequestToken = 0;
+let webSearchHistoryToken = 0;
 let previewTimer = null;
 let lastTreeNodes = [];
 let documentLinkIndex = DocumentLinks.buildIndex([], rootPath);
@@ -818,23 +823,35 @@ function relatedFingerprint(candidates) {
 
 function renderRelatedToolbar() {
 	const count = relatedItems.length;
-	relatedToolbarCount.textContent = String(count);
 	relatedCount.textContent = String(count);
-	relatedButton.hidden = count === 0;
+}
+
+function renderWebSearchToolbar() {
+	webSearchCount.textContent = String(webSearchHistory.length);
 }
 
 function setSupportView(view) {
-	supportView = view === "related" ? "related" : "annotation";
+	supportView = ["related", "web-search"].includes(view)
+		? view
+		: "annotation";
 	const related = supportView === "related";
-	annotationViewButton.classList.toggle("active", !related);
+	const webSearch = supportView === "web-search";
+	annotationViewButton.classList.toggle("active", !related && !webSearch);
 	relatedViewButton.classList.toggle("active", related);
-	annotationViewButton.setAttribute("aria-selected", String(!related));
+	webSearchViewButton.classList.toggle("active", webSearch);
+	annotationViewButton.setAttribute(
+		"aria-selected",
+		String(!related && !webSearch),
+	);
 	relatedViewButton.setAttribute("aria-selected", String(related));
-	newAnnotationButton.hidden = related;
-	annotateStream.hidden = related;
-	annotateFooter.hidden = related;
+	webSearchViewButton.setAttribute("aria-selected", String(webSearch));
+	newAnnotationButton.hidden = related || webSearch;
+	annotateStream.hidden = related || webSearch;
+	annotateFooter.hidden = related || webSearch;
 	relatedStream.hidden = !related;
+	webSearchStream.hidden = !webSearch;
 	if (related) renderRelatedPanel();
+	if (webSearch) renderWebSearchState();
 }
 
 function renderRelatedPanel() {
@@ -2103,13 +2120,13 @@ async function addLibrarySource() {
 }
 
 async function setSidebarMode(mode) {
-	webSearchRequestToken += 1;
 	const nextLibraryMode = mode === "library";
 	const nextAgentMode = mode === "agent";
 	if (libraryMode === nextLibraryMode && agentMode === nextAgentMode) {
 		if (agentMode) await loadAgentWorks();
 		return;
 	}
+	clearWebSearch();
 	libraryMode = nextLibraryMode;
 	agentMode = nextAgentMode;
 	workspaceTab.classList.toggle("active", !libraryMode && !agentMode);
@@ -2164,6 +2181,7 @@ async function useWorkspace(data) {
 		citationBasket.clear();
 		renderCitationSummary();
 		clearRelated();
+		clearWebSearch({ clearHistory: true });
 	}
 	editor.readOnly = false;
 	editor.classList.remove("readonly");
@@ -2181,6 +2199,7 @@ async function useWorkspace(data) {
 	documentLinkIndex = DocumentLinks.buildIndex(data.nodes, rootPath);
 	renderTree(data.nodes);
 	await hydrateRelatedPins();
+	await loadWebSearchHistory();
 }
 
 async function chooseWorkspace() {
@@ -2290,6 +2309,7 @@ async function openFile(path, name, row) {
 
 async function openLibraryDocument(hit) {
 	clearRelated();
+	clearWebSearch();
 	const token = ++loadToken;
 	await saveCurrent();
 	if (annotateDirty) await saveAnnotate();
@@ -2317,6 +2337,7 @@ async function openLibraryDocument(hit) {
 		previewEl.scrollTop = 0;
 		markReadonly();
 		await loadAnnotationPanel();
+		await loadWebSearchHistory();
 	} catch (error) {
 		console.error(error);
 		markError("资料打开失败");
@@ -2325,6 +2346,7 @@ async function openLibraryDocument(hit) {
 
 function showDocument(path, name, text, row) {
 	clearRelated();
+	clearWebSearch();
 	currentFile = path;
 	currentLibraryDocument = null;
 	currentAgentDocument = null;
@@ -2346,6 +2368,7 @@ function showDocument(path, name, text, row) {
 	markSaved();
 	loadAnnotationPanel();
 	scheduleRelatedRefresh(0);
+	void loadWebSearchHistory();
 }
 
 function renderAgentWorks(items = allAgentWorkItems()) {
@@ -2500,6 +2523,7 @@ async function openAgentWork(item) {
 
 function showAgentDocument(data) {
 	clearRelated();
+	clearWebSearch();
 	currentAgentDocument = data;
 	currentFile = null;
 	currentLibraryDocument = null;
@@ -2515,6 +2539,7 @@ function showAgentDocument(data) {
 	previewEl.scrollTop = 0;
 	markSaved();
 	loadAnnotationPanel();
+	void loadWebSearchHistory();
 	if (agentMode) renderAgentWorks();
 }
 
@@ -3355,17 +3380,43 @@ async function clearBraveApiKey() {
 async function searchWebFromSelection(range) {
 	const query = range?.quote?.trim();
 	if (!query) return;
-	searchInput.value = query;
-	clearTimeout(searchTimer);
-	searchTimer = null;
 	const requestToken = ++webSearchRequestToken;
+	const historyToken = ++webSearchHistoryToken;
+	const documentUri = currentDocumentUri();
+	setAnnotateVisible(true);
 	renderWebSearchMessage("正在通过 Brave 搜索互联网…");
+	setSupportView("web-search");
 	try {
-		const hits = await invoke("search_web", { query, count: 10 });
-		if (requestToken === webSearchRequestToken)
-			renderWebSearchResults(hits, query);
+		const history = await invoke("search_web", {
+			query,
+			count: 10,
+			documentUri,
+			selectedText: range.quote,
+		});
+		if (
+			requestToken !== webSearchRequestToken ||
+			historyToken !== webSearchHistoryToken
+		)
+			return;
+		webSearchHistory = [
+			history,
+			...webSearchHistory.filter((item) => item.id !== history.id),
+		];
+		expandedWebSearchIds.add(history.id);
+		webSearchMessage = "";
+		renderWebSearchToolbar();
+		await refreshWebSearchLinks();
+		if (
+			requestToken === webSearchRequestToken &&
+			historyToken === webSearchHistoryToken
+		)
+			renderWebSearchState();
 	} catch (error) {
-		if (requestToken !== webSearchRequestToken) return;
+		if (
+			requestToken !== webSearchRequestToken ||
+			historyToken !== webSearchHistoryToken
+		)
+			return;
 		console.error("Brave 互联网搜索失败", error);
 		renderWebSearchMessage(
 			String(error).includes("未配置")
@@ -3438,8 +3489,63 @@ function setAnnotateVisible(visible) {
 	if (visible && annotateLoadedDoc !== documentRefKey()) loadAnnotationPanel();
 }
 
-function clearSearch() {
+function clearWebSearch({ resetView = true, clearHistory = false } = {}) {
 	webSearchRequestToken += 1;
+	webSearchHistoryToken += 1;
+	webSearchMessage = "";
+	if (clearHistory) {
+		webSearchHistory = [];
+		expandedWebSearchIds.clear();
+	}
+	linkedWebSearchResultIds.clear();
+	webSearchCount.textContent = String(webSearchHistory.length);
+	webSearchStream.replaceChildren();
+	if (resetView && supportView === "web-search") setSupportView("annotation");
+}
+
+async function refreshWebSearchLinks() {
+	const token = webSearchHistoryToken;
+	linkedWebSearchResultIds.clear();
+	const sourceUri = currentDocumentUri();
+	if (!sourceUri) return;
+	try {
+		const ids = await invoke("list_search_result_links", { sourceUri });
+		if (token !== webSearchHistoryToken) return;
+		for (const id of ids || []) linkedWebSearchResultIds.add(Number(id));
+	} catch (error) {
+		console.warn("读取网页搜索关联失败", error);
+	}
+}
+
+async function loadWebSearchHistory() {
+	const token = ++webSearchHistoryToken;
+	if (!rootPath) {
+		clearWebSearch({ resetView: false, clearHistory: true });
+		return;
+	}
+	try {
+		const histories = await invoke("list_web_search_history", { limit: 50 });
+		if (token !== webSearchHistoryToken) return;
+		webSearchHistory = Array.isArray(histories) ? histories : [];
+		const validIds = new Set(webSearchHistory.map((history) => history.id));
+		for (const id of [...expandedWebSearchIds]) {
+			if (!validIds.has(id)) expandedWebSearchIds.delete(id);
+		}
+		await refreshWebSearchLinks();
+		if (token !== webSearchHistoryToken) return;
+		webSearchMessage = "";
+		renderWebSearchToolbar();
+		if (supportView === "web-search") renderWebSearchState();
+	} catch (error) {
+		if (token !== webSearchHistoryToken) return;
+		console.warn("读取网页搜索历史失败", error);
+		webSearchMessage = "读取网页搜索历史失败，请稍后重试";
+		renderWebSearchToolbar();
+		if (supportView === "web-search") renderWebSearchState();
+	}
+}
+
+function clearSearch() {
 	searchInput.value = "";
 	if (libraryMode) {
 		renderLibraryHome();
@@ -3504,60 +3610,190 @@ function renderSearchResults(hits) {
 	treeEl.appendChild(fragment);
 }
 
-function renderWebSearchMessage(message) {
-	treeEl.replaceChildren();
-	const tip = document.createElement("div");
-	tip.className = "empty-tip web-search-message";
-	tip.textContent = message;
-	treeEl.appendChild(tip);
+function formatWebSearchTime(value) {
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return value || "";
+	return date.toLocaleString("zh-CN", {
+		month: "numeric",
+		day: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+	});
 }
 
-function renderWebSearchResults(hits, query) {
-	treeEl.replaceChildren();
-	const heading = document.createElement("div");
-	heading.className = "web-search-heading";
-	heading.textContent = `Brave 网页搜索 · ${hits.length} 条`;
-	heading.title = query;
-	treeEl.appendChild(heading);
-	if (!hits.length) {
-		const tip = document.createElement("div");
-		tip.className = "empty-tip web-search-message";
-		tip.textContent = "Brave 没有返回匹配的网页";
-		treeEl.appendChild(tip);
+function webSearchDocumentLabel(uri) {
+	if (!uri) return "未关联笔记";
+	if (uri.startsWith("workspace://")) return `笔记：${uri.slice(12)}`;
+	return `来源：${uri}`;
+}
+
+async function openWebSearchUrl(url, event) {
+	event.preventDefault();
+	try {
+		if (typeof openUrl !== "function")
+			throw new Error("Tauri opener API 不可用");
+		await openUrl(url);
+	} catch (error) {
+		console.error("打开网页失败", error);
+		markError("无法打开网页");
+	}
+}
+
+async function toggleWebSearchResultLink(resultId) {
+	const token = webSearchHistoryToken;
+	const sourceUri = currentDocumentUri();
+	if (!sourceUri) {
+		markError("请先打开当前笔记");
 		return;
 	}
-	const fragment = document.createDocumentFragment();
-	for (const hit of hits) {
-		const row = document.createElement("a");
-		row.className = "tree-file search-hit web-search-hit";
-		row.href = hit.url;
-		row.target = "_blank";
-		row.rel = "noreferrer";
-		const title = document.createElement("span");
-		title.className = "hit-title";
-		title.textContent = hit.title;
-		const description = document.createElement("span");
-		description.className = "hit-snippet";
-		description.textContent = hit.description || hit.url;
-		const meta = document.createElement("span");
-		meta.className = "web-search-meta";
-		let host = hit.url;
-		try {
-			host = new URL(hit.url).hostname;
-		} catch (_) {}
-		meta.textContent = hit.age ? `${host} · ${hit.age}` : host;
-		row.append(title, description, meta);
-		row.addEventListener("click", (event) => {
-			if (!openUrl) return;
-			event.preventDefault();
-			void openUrl(hit.url).catch((error) => {
-				console.error("打开网页失败", error);
-				markError("无法打开网页");
-			});
+	const linked = linkedWebSearchResultIds.has(Number(resultId));
+	try {
+		await invoke(linked ? "unlink_search_result" : "link_search_result", {
+			sourceUri,
+			resultId: Number(resultId),
 		});
-		fragment.appendChild(row);
+		if (token !== webSearchHistoryToken) return;
+		if (linked) linkedWebSearchResultIds.delete(Number(resultId));
+		else linkedWebSearchResultIds.add(Number(resultId));
+		renderWebSearchState();
+	} catch (error) {
+		if (token !== webSearchHistoryToken) return;
+		console.error("更新网页搜索关联失败", error);
+		markError("关联搜索结果失败");
 	}
-	treeEl.appendChild(fragment);
+}
+
+function renderWebSearchResultCard(result) {
+	const card = document.createElement("article");
+	card.className = `web-search-result${
+		linkedWebSearchResultIds.has(Number(result.id)) ? " linked" : ""
+	}`;
+	const link = document.createElement("a");
+	link.className = "web-search-hit";
+	link.href = result.url;
+	link.target = "_blank";
+	link.rel = "noopener noreferrer";
+	const title = document.createElement("span");
+	title.className = "hit-title";
+	title.textContent = result.title;
+	const description = document.createElement("span");
+	description.className = "hit-snippet";
+	description.textContent = result.description || result.url;
+	const meta = document.createElement("span");
+	meta.className = "web-search-meta";
+	let host = result.url;
+	try {
+		host = new URL(result.url).hostname;
+	} catch (_) {}
+	meta.textContent = result.age ? `${host} · ${result.age}` : host;
+	link.append(title, description, meta);
+	link.addEventListener("click", (event) =>
+		void openWebSearchUrl(result.url, event),
+	);
+	card.appendChild(link);
+
+	const actions = document.createElement("div");
+	actions.className = "web-search-result-actions";
+	const relation = document.createElement("button");
+	relation.type = "button";
+	relation.className = "related-card-pin web-search-link-button";
+	const linked = linkedWebSearchResultIds.has(Number(result.id));
+	relation.disabled = !currentDocumentUri();
+	relation.textContent = linked ? "✓ 已关联当前笔记" : "关联当前笔记";
+	relation.title = linked
+		? "取消与当前笔记的关联"
+		: "把这条网页搜索结果关联到当前笔记";
+	relation.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		void toggleWebSearchResultLink(result.id);
+	});
+	actions.appendChild(relation);
+	card.appendChild(actions);
+	return card;
+}
+
+function renderWebSearchHistory() {
+	webSearchStream.replaceChildren();
+	renderWebSearchToolbar();
+	const heading = document.createElement("div");
+	heading.className = "web-search-heading";
+	heading.textContent = `网页搜索历史 · ${webSearchHistory.length} 条`;
+	webSearchStream.appendChild(heading);
+	if (webSearchMessage) {
+		const message = document.createElement("div");
+		message.className = "empty-tip web-search-message";
+		message.textContent = webSearchMessage;
+		webSearchStream.appendChild(message);
+	}
+	if (!webSearchHistory.length) {
+		if (!webSearchMessage) {
+			const empty = document.createElement("div");
+			empty.className = "empty-tip web-search-message";
+			empty.textContent = "还没有网页搜索历史，选中文字后点“联网搜索”";
+			webSearchStream.appendChild(empty);
+		}
+		return;
+	}
+
+	const fragment = document.createDocumentFragment();
+	for (const history of webSearchHistory) {
+		const card = document.createElement("article");
+		card.className = "web-search-history";
+		const expanded = expandedWebSearchIds.has(history.id);
+		const toggle = document.createElement("button");
+		toggle.type = "button";
+		toggle.className = "web-search-history-toggle";
+		toggle.setAttribute("aria-expanded", String(expanded));
+		const marker = document.createElement("span");
+		marker.className = "web-search-history-marker";
+		marker.textContent = expanded ? "⌄" : "›";
+		const query = document.createElement("strong");
+		query.className = "web-search-history-query";
+		query.textContent = history.query;
+		query.title = history.query;
+		const meta = document.createElement("span");
+		meta.className = "web-search-history-meta";
+		meta.textContent = `${history.results?.length || 0} 条结果 · ${formatWebSearchTime(history.createdAt)} · ${webSearchDocumentLabel(history.documentUri)}`;
+		toggle.append(marker, query, meta);
+		toggle.addEventListener("click", () => {
+			if (expanded) expandedWebSearchIds.delete(history.id);
+			else expandedWebSearchIds.add(history.id);
+			renderWebSearchState();
+		});
+		card.appendChild(toggle);
+		if (history.selectedText) {
+			const quote = document.createElement("div");
+			quote.className = "web-search-history-quote";
+			quote.textContent = `选区：${history.selectedText}`;
+			card.appendChild(quote);
+		}
+		if (expanded) {
+			const results = document.createElement("div");
+			results.className = "web-search-history-results";
+			if (!history.results?.length) {
+				const empty = document.createElement("div");
+				empty.className = "empty-tip web-search-message";
+				empty.textContent = "这次搜索没有返回网页";
+				results.appendChild(empty);
+			} else {
+				for (const result of history.results)
+					results.appendChild(renderWebSearchResultCard(result));
+			}
+			card.appendChild(results);
+		}
+		fragment.appendChild(card);
+	}
+	webSearchStream.appendChild(fragment);
+}
+
+function renderWebSearchMessage(message) {
+	webSearchMessage = message;
+	renderWebSearchHistory();
+}
+
+function renderWebSearchState() {
+	renderWebSearchHistory();
 }
 
 function renderTree(nodes) {
@@ -3836,15 +4072,13 @@ settingsForm.addEventListener("submit", (event) => {
 });
 cancelSettingsButton.addEventListener("click", () => settingsDialog.close());
 clearBraveApiKeyButton.addEventListener("click", () => void clearBraveApiKey());
-askAgentButton.addEventListener("click", () => void beginAgentQuestion());
-relatedButton.addEventListener("click", () => {
-	setAnnotateVisible(true);
-	setSupportView("related");
-});
 annotationViewButton.addEventListener("click", () =>
 	setSupportView("annotation"),
 );
 relatedViewButton.addEventListener("click", () => setSupportView("related"));
+webSearchViewButton.addEventListener("click", () =>
+	setSupportView("web-search"),
+);
 agentAskForm.addEventListener("submit", submitAgentQuestion);
 agentAskCancel.addEventListener("click", () => {
 	pendingAgentRequest = null;
@@ -3936,7 +4170,6 @@ document.addEventListener("pointerdown", (event) => {
 		hideSelectionAnnotate();
 });
 searchInput.addEventListener("input", () => {
-	webSearchRequestToken += 1;
 	clearTimeout(searchTimer);
 	searchTimer = setTimeout(runSearch, 250);
 });
