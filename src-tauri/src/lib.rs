@@ -1295,6 +1295,96 @@ async fn write_agent_work(
     agent_work::write_at(&app, &root, input)
 }
 
+// ---------------------------------------------------------------------------
+// Work 视图命令面（M2 内容 / M3 Shell）——全部只是 work.rs domain 的薄投影，
+// 状态机与事件仍归 domain rule；UI 不接触 SQLite 细节。
+// ---------------------------------------------------------------------------
+
+/// 当前 Workspace 的 Work 列表（updated_at DESC, id DESC）。
+#[tauri::command]
+async fn list_works(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<work::WorkRecord>, String> {
+    let root = workspace_root(&state)?;
+    let workspace_id = workspace_id_for_root(&root);
+    let conn = open_durable_state(&app)?;
+    work::list_works(
+        &conn,
+        Some(&workspace_id),
+        limit.unwrap_or(100).clamp(1, 500),
+    )
+}
+
+#[tauri::command]
+async fn get_work(app: AppHandle, work_id: String) -> Result<work::WorkRecord, String> {
+    let conn = open_durable_state(&app)?;
+    work::get_work(&conn, &work_id)?.ok_or_else(|| format!("Work 不存在: {work_id}"))
+}
+
+/// 人工明确接受 → completed。这是 Work `completed` 的唯一入口；
+/// 非法转换（如 queued/running 直接完成）由状态机拒绝并透传给 UI。
+#[tauri::command]
+async fn work_accept(app: AppHandle, work_id: String) -> Result<work::WorkRecord, String> {
+    let mut conn = open_durable_state(&app)?;
+    work::transition_work(
+        &mut conn,
+        &work_id,
+        work::WorkStatus::Completed,
+        state_store::ActorKind::Human,
+        Some("人工接受成果"),
+    )
+}
+
+/// 人工取消 → cancelled。若该 Work 的 run 正在 Pi 上运行，先走与
+/// `agent_abort` 相同的中止通路（abort 核心会把 Work 落为 cancelled）。
+#[tauri::command]
+async fn work_cancel(
+    app: AppHandle,
+    process: State<'_, pi_agent::PiProcessState>,
+    work_id: String,
+) -> Result<work::WorkRecord, String> {
+    let process = process.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || pi_agent::cancel_work(&process, &app, &work_id))
+        .await
+        .map_err(|error| format!("Work 取消任务异常: {error}"))?
+}
+
+/// Work 的语义事件（仅 work.*，新的在前）。
+#[tauri::command]
+async fn work_events(
+    app: AppHandle,
+    work_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<state_store::EventRecord>, String> {
+    let conn = open_durable_state(&app)?;
+    state_store::events_for_work(&conn, &work_id, limit.unwrap_or(20).clamp(1, 100))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkReceiptProbe {
+    exists: bool,
+    path: Option<String>,
+}
+
+/// 运行收据存在性探针：只报告 receipt 文件是否存在与所在路径，
+/// 不解析内容（receipt 本体由 Pi runtime 留存）。
+#[tauri::command]
+async fn work_receipt_probe(app: AppHandle, receipt_ref: String) -> Result<WorkReceiptProbe, String> {
+    match pi_agent::receipt_path(&app, receipt_ref.trim())? {
+        Some(path) => Ok(WorkReceiptProbe {
+            exists: path.is_file(),
+            path: Some(path.to_string_lossy().to_string()),
+        }),
+        None => Ok(WorkReceiptProbe {
+            exists: false,
+            path: None,
+        }),
+    }
+}
+
 /// 读取当前文档的批注（侧车不存在时返回空正文）。
 #[tauri::command]
 async fn read_annotation(
@@ -1485,6 +1575,12 @@ pub fn run() {
             read_agent_work,
             create_agent_work,
             write_agent_work,
+            list_works,
+            get_work,
+            work_accept,
+            work_cancel,
+            work_events,
+            work_receipt_probe,
             read_annotation,
             save_annotation,
             aggregate_annotations,

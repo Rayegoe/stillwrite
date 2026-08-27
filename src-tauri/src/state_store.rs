@@ -525,6 +525,24 @@ pub fn events_for_object(
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// 某个 Work 的语义事件（仅 work.*，新的在前）——Work 详情「证据」的数据源。
+pub fn events_for_work(
+    conn: &Connection,
+    work_id: &str,
+    limit: usize,
+) -> Result<Vec<EventRecord>, String> {
+    let sql = format!(
+        "SELECT {EVENT_COLUMNS} FROM events WHERE work_id = ?1 AND action LIKE 'work.%' ORDER BY id DESC LIMIT ?2"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("查询 work 事件失败: {e}"))?;
+    let rows = stmt
+        .query_map(params![work_id, limit as i64], row_to_event)
+        .map_err(|e| format!("查询 work 事件失败: {e}"))?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 // ---------------------------------------------------------------------------
 // Web search history
 // ---------------------------------------------------------------------------
@@ -1829,6 +1847,61 @@ mod tests {
         let by_object = events_for_object(&conn, "workspace://notes.md", 10).unwrap();
         assert_eq!(by_object.len(), 1);
         assert_eq!(by_object[0].id, 1);
+    }
+
+    #[test]
+    fn events_for_work_returns_only_that_works_work_events() {
+        let (_dir, mut conn) = open_fresh();
+        record_event(
+            &mut conn,
+            NewEvent {
+                action: event_action::WORK_CREATED.into(),
+                object_uri: Some(ObjectUri::work("work-1")),
+                work_id: Some("work-1".into()),
+                ..NewEvent::default()
+            },
+        )
+        .unwrap();
+        record_event(
+            &mut conn,
+            NewEvent {
+                action: event_action::WORK_STATUS_CHANGED.into(),
+                object_uri: Some(ObjectUri::work("work-1")),
+                work_id: Some("work-1".into()),
+                ..NewEvent::default()
+            },
+        )
+        .unwrap();
+        // 其它 work 的事件、非 work.* 动作都不该出现在 work-1 的证据里
+        record_event(
+            &mut conn,
+            NewEvent {
+                action: event_action::WORK_CREATED.into(),
+                work_id: Some("work-2".into()),
+                ..NewEvent::default()
+            },
+        )
+        .unwrap();
+        record_event(
+            &mut conn,
+            NewEvent {
+                action: event_action::RELATION_CREATED.into(),
+                work_id: Some("work-1".into()),
+                ..NewEvent::default()
+            },
+        )
+        .unwrap();
+
+        let events = events_for_work(&conn, "work-1", 10).unwrap();
+        let actions: Vec<_> = events.iter().map(|event| event.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            vec![event_action::WORK_STATUS_CHANGED, event_action::WORK_CREATED]
+        );
+        assert_eq!(events_for_work(&conn, "work-missing", 10).unwrap().len(), 0);
+        let limited = events_for_work(&conn, "work-1", 1).unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].action, event_action::WORK_STATUS_CHANGED);
     }
 
     #[test]

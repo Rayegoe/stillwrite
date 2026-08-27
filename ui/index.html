@@ -88,11 +88,11 @@
             <div class="sidebar-tabs" role="tablist" aria-label="内容平面">
               <button
                 class="sidebar-tab active"
-                id="workspaceTab"
+                id="workTab"
                 role="tab"
                 aria-selected="true"
               >
-                文件
+                工作
               </button>
               <button
                 class="sidebar-tab"
@@ -104,11 +104,11 @@
               </button>
               <button
                 class="sidebar-tab"
-                id="agentTab"
+                id="workspaceTab"
                 role="tab"
                 aria-selected="false"
               >
-                Agent
+                文件
               </button>
             </div>
             <div class="sidebar-head-actions">
@@ -165,8 +165,16 @@
               清空
             </button>
           </div>
-          <div class="agent-meta" id="agentMeta" hidden>
-            <div id="agentStats">还没有 Agent 工作</div>
+          <div class="agent-meta" id="workMeta" hidden>
+            <div id="workStats">还没有工作</div>
+            <button
+              class="text-btn"
+              id="legacyAgentWorksToggle"
+              type="button"
+              title="旧版 Agent 工作列表（兼容入口，迁移期间保留）"
+            >
+              旧 Agent 工作
+            </button>
           </div>
           <div class="tree" id="tree">
             <div class="empty-tip">从“文件”菜单打开文件夹或 Markdown 文档</div>
@@ -190,6 +198,13 @@
         ></div>
 
         <section class="panes" id="panes">
+          <section class="pane work-pane" id="workPane">
+            <div class="pane-label">WORK</div>
+            <div class="work-surface" id="workSurface">
+              <div class="work-home" id="workHome" hidden></div>
+              <div class="work-detail" id="workDetail" hidden></div>
+            </div>
+          </section>
           <section class="pane editor-pane" id="editorPane">
             <div class="pane-label" id="editorPaneLabel">WRITE</div>
             <textarea
@@ -261,6 +276,28 @@
               >
                 搜索 <span class="annotate-count" id="webSearchCount">0</span>
               </button>
+              <button
+                class="support-view-tab"
+                id="workContextViewButton"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="workContextStream"
+                hidden
+              >
+                上下文
+              </button>
+              <button
+                class="support-view-tab"
+                id="workEvidenceViewButton"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="workEvidenceStream"
+                hidden
+              >
+                证据 <span class="annotate-count" id="workEvidenceCount">0</span>
+              </button>
             </div>
             <div class="annotate-actions">
               <button
@@ -321,6 +358,8 @@
             id="webSearchStream"
             hidden
           ></div>
+          <div class="related-stream work-context-stream" id="workContextStream" hidden></div>
+          <div class="related-stream work-evidence-stream" id="workEvidenceStream" hidden></div>
           <div class="annotate-foot" id="annotateFooter">
             <span id="annotateFoot">批注保存在「批注/」，随文档同步。</span>
             <button
@@ -467,6 +506,7 @@
     <script src="./document-links.js"></script>
     <script src="./agent-events.js"></script>
     <script src="./feeds.js"></script>
+    <script src="./work-view.js"></script>
     <script src="./app.js"></script>
     <script src="./library-annotation-links.js"></script>
   </body>

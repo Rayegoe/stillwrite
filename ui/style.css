@@ -1968,3 +1968,219 @@ kbd {
 		color: #211f1c;
 	}
 }
+
+/* ---------------------------------------------------------------------------
+   Work Home / Work Surface（M3 Shell）
+   --------------------------------------------------------------------------- */
+
+/* 中栏 Work Surface：data-mode="work" 时取代 editor/reader */
+#workPane {
+	flex: 1 1 100%;
+	min-width: 0;
+	display: none;
+	flex-direction: column;
+	overflow-y: auto;
+}
+.shell[data-mode="work"] .editor-pane,
+.shell[data-mode="work"] .reader-pane,
+.shell[data-mode="work"] .pane-handle {
+	display: none;
+}
+.shell[data-mode="work"] #workPane {
+	display: flex;
+}
+#workPane.hidden {
+	display: none;
+}
+.work-surface {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	padding: 24px 28px 40px;
+	max-width: 880px;
+}
+
+/* 侧栏三组 */
+.work-group-head {
+	padding: 12px 8px 4px;
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	color: var(--muted);
+}
+.work-item .agent-work-open {
+	gap: 2px;
+}
+.work-row-head {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	min-width: 0;
+}
+.work-row-time {
+	margin-left: auto;
+	flex: none;
+	font-size: 11px;
+	color: var(--muted);
+}
+.work-badge {
+	flex: none;
+	display: inline-block;
+	padding: 1px 7px;
+	border-radius: 999px;
+	font-size: 11px;
+	line-height: 1.6;
+	border: 1px solid var(--line);
+	background: var(--panel);
+	color: var(--muted);
+}
+.work-badge-blue {
+	color: #2b5cad;
+	border-color: rgba(43, 92, 173, 0.35);
+	background: rgba(43, 92, 173, 0.08);
+}
+.work-badge-orange {
+	color: #a24a12;
+	border-color: rgba(162, 74, 18, 0.4);
+	background: rgba(224, 122, 34, 0.12);
+	font-weight: 600;
+}
+.work-badge-amber {
+	color: #7a5a10;
+	border-color: rgba(158, 120, 24, 0.4);
+	background: rgba(196, 154, 38, 0.12);
+}
+.work-badge-green {
+	color: #2e6b3a;
+	border-color: rgba(46, 107, 58, 0.35);
+	background: rgba(46, 107, 58, 0.08);
+}
+.work-badge-red {
+	color: #a02c2c;
+	border-color: rgba(160, 44, 44, 0.35);
+	background: rgba(160, 44, 44, 0.08);
+}
+.work-badge-gray {
+	color: var(--muted);
+}
+
+/* Work Home（未选中工作时的中栏默认页） */
+.work-home-title {
+	margin: 8px 0 4px;
+	font-size: 26px;
+}
+.work-home-subtitle {
+	margin: 0 0 18px;
+	color: var(--muted);
+}
+.work-home-counts {
+	display: flex;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin-bottom: 18px;
+}
+.work-home-count {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 12px 18px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--panel);
+}
+.work-home-count strong {
+	font-size: 22px;
+}
+.work-home-count span {
+	color: var(--muted);
+	font-size: 13px;
+}
+.work-home-ask {
+	align-self: flex-start;
+}
+
+/* Work 详情 */
+.work-detail-back {
+	align-self: flex-start;
+	padding-left: 0;
+}
+.work-detail-head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.work-detail-title {
+	margin: 0;
+	font-size: 20px;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+.work-detail-actions {
+	display: flex;
+	gap: 8px;
+}
+.work-detail-body {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+.work-detail-section {
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	padding: 10px 14px;
+	background: var(--paper);
+}
+.work-detail-key {
+	font-size: 12px;
+	color: var(--muted);
+	margin-bottom: 4px;
+}
+.work-detail-value {
+	font-size: 14px;
+	line-height: 1.6;
+	overflow-wrap: anywhere;
+}
+.work-prewrap {
+	white-space: pre-wrap;
+}
+.work-muted {
+	color: var(--muted);
+}
+.work-artifact-link {
+	padding-left: 0;
+}
+.work-evidence-hint {
+	margin-top: 4px;
+	font-size: 12px;
+}
+
+/* 右栏 Work Context（上下文 | 证据） */
+.work-panel-block {
+	margin-bottom: 16px;
+}
+.work-event-line {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 4px 0;
+	border-bottom: 1px dashed var(--line);
+	font-size: 13px;
+}
+.work-event-action {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 12px;
+}
+.work-event-time {
+	margin-left: auto;
+	flex: none;
+	color: var(--muted);
+	font-size: 12px;
+}
+.work-event-reason {
+	flex-basis: 100%;
+	color: var(--muted);
+	font-size: 12px;
+	padding-bottom: 4px;
+	overflow-wrap: anywhere;
+}

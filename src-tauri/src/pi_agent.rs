@@ -570,6 +570,11 @@ impl PiProcessState {
             .and_then(|runtime| runtime.as_ref().map(|runtime| runtime.process.clone()))
     }
 
+    /// 当前进行中的 run id（若有）。Work 取消命令用它判断是否需要中止 Pi。
+    pub fn active_run_id(&self) -> Option<String> {
+        self.current_process()?.active_run().map(|run| run.run_id)
+    }
+
     /// 关闭属于其它 Workspace 的 Pi 进程。若进程上有进行中的 run，
     /// 返回其 run id（调用方负责把对应 Work 转为 cancelled）。
     pub fn shutdown_for_workspace(&self, next_root: &Path) -> Option<String> {
@@ -723,6 +728,15 @@ fn runs_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Work 证据探针：run 收据文件路径（只报告存在性，不读取内容）。
+/// run id 非法时返回 None，避免用任意字符串拼路径。
+pub(crate) fn receipt_path(app: &AppHandle, run_id: &str) -> Result<Option<PathBuf>, String> {
+    if !valid_identifier(run_id) {
+        return Ok(None);
+    }
+    Ok(Some(runs_dir(app)?.join(format!("{run_id}.jsonl"))))
+}
+
 fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -809,6 +823,40 @@ pub(crate) fn cancel_run_work(app: &AppHandle, run_id: &str, reason: &str) {
 /// 运行期致命错误（Pi 进程死亡 / 扩展报错）→ Work failed。
 fn fail_run_work(app: &AppHandle, run_id: &str, reason: &str) {
     transition_run_work(app, run_id, WorkStatus::Failed, ActorKind::Agent, Some(reason));
+}
+
+/// Work 视图的取消入口：该 Work 的 run 正在 Pi 上运行时先走 abort 核心
+/// （核心会把 Work 落为 cancelled），否则直接做状态转换。同状态重复取消
+/// 由 transition_work 幂等吸收。
+pub fn cancel_work(
+    process: &PiProcessState,
+    app: &AppHandle,
+    work_id: &str,
+) -> Result<work::WorkRecord, String> {
+    let mut conn = crate::open_durable_state(app)?;
+    let record = work::get_work(&conn, work_id)?.ok_or_else(|| format!("Work 不存在: {work_id}"))?;
+    let running = record
+        .receipt_ref
+        .as_deref()
+        .zip(process.active_run_id())
+        .is_some_and(|(receipt, active)| receipt == active);
+    if running {
+        drop(conn);
+        abort_active_run(process, app)?;
+        conn = crate::open_durable_state(app)?;
+    }
+    let reason = if running {
+        "用户停止 Agent"
+    } else {
+        "用户取消工作"
+    };
+    work::transition_work(
+        &mut conn,
+        work_id,
+        WorkStatus::Cancelled,
+        ActorKind::Human,
+        Some(reason),
+    )
 }
 
 /// 启动失败分类：缺 Pi 可执行文件 / 缺 provider 模型属于依赖缺失（补齐后可重试）
@@ -1661,6 +1709,46 @@ pub async fn agent_start(
     .map_err(|error| format!("Agent start 任务异常: {error}"))?
 }
 
+/// abort 的共享核心：清队列 → 中止 → 等待 idle；成功时把对应 Work 转为
+/// cancelled。`agent_abort` 命令与 `work_cancel` 命令（Work 视图入口）共用。
+/// 返回被中止的 run id（没有进行中的 run 时为 None）。
+pub(crate) fn abort_active_run(
+    process: &PiProcessState,
+    app: &AppHandle,
+) -> Result<Option<String>, String> {
+    let Some(child) = process.current_process() else {
+        return Ok(None);
+    };
+    let Some(run) = child.active_run() else {
+        return Ok(None);
+    };
+    let control = (|| -> Result<(), String> {
+        let clear = child.request(json!({ "type": "clear_queue" }), ABORT_TIMEOUT)?;
+        if !clear.success {
+            return Err(rpc_failure("清空 Pi 队列失败", &clear));
+        }
+        let abort = child.request(json!({ "type": "abort" }), ABORT_TIMEOUT)?;
+        if !abort.success {
+            return Err(rpc_failure("停止 Pi Agent 失败", &abort));
+        }
+        wait_for_idle(&child)?;
+        Ok(())
+    })();
+    if let Err(error) = control {
+        let message = format!("停止 Agent 失败，已终止 Pi 进程: {error}");
+        child.clear_run();
+        child.shutdown();
+        emit_direct_event(&child, &run.run_id, "error", Some(short_error(&message)));
+        return Err(message);
+    }
+    if child.take_run(&run.run_id).is_some() {
+        emit_direct_event(&child, &run.run_id, "agent_stopped", None);
+        // abort 成功 → Work cancelled（失败时收据侧仍记录 STOPPED 事实）
+        cancel_run_work(app, &run.run_id, "用户停止 Agent");
+    }
+    Ok(Some(run.run_id))
+}
+
 #[tauri::command]
 pub async fn agent_abort(
     app: AppHandle,
@@ -1668,45 +1756,10 @@ pub async fn agent_abort(
 ) -> Result<AgentAbortResponse, String> {
     let process = PiProcessState::from_store(Arc::clone(&process.store));
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(child) = process.current_process() else {
-            return Ok(AgentAbortResponse {
-                accepted: false,
-                run_id: None,
-            });
-        };
-        let Some(run) = child.active_run() else {
-            return Ok(AgentAbortResponse {
-                accepted: false,
-                run_id: None,
-            });
-        };
-        let control = (|| -> Result<(), String> {
-            let clear = child.request(json!({ "type": "clear_queue" }), ABORT_TIMEOUT)?;
-            if !clear.success {
-                return Err(rpc_failure("清空 Pi 队列失败", &clear));
-            }
-            let abort = child.request(json!({ "type": "abort" }), ABORT_TIMEOUT)?;
-            if !abort.success {
-                return Err(rpc_failure("停止 Pi Agent 失败", &abort));
-            }
-            wait_for_idle(&child)?;
-            Ok(())
-        })();
-        if let Err(error) = control {
-            let message = format!("停止 Agent 失败，已终止 Pi 进程: {error}");
-            child.clear_run();
-            child.shutdown();
-            emit_direct_event(&child, &run.run_id, "error", Some(short_error(&message)));
-            return Err(message);
-        }
-        if child.take_run(&run.run_id).is_some() {
-            emit_direct_event(&child, &run.run_id, "agent_stopped", None);
-            // abort 成功 → Work cancelled（失败时收据侧仍记录 STOPPED 事实）
-            cancel_run_work(&app, &run.run_id, "用户停止 Agent");
-        }
+        let run_id = abort_active_run(&process, &app)?;
         Ok(AgentAbortResponse {
-            accepted: true,
-            run_id: Some(run.run_id),
+            accepted: run_id.is_some(),
+            run_id,
         })
     })
     .await

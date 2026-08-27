@@ -24,7 +24,16 @@ const syncStateEl = document.querySelector("#syncState");
 const searchInput = document.querySelector("#searchInput");
 const workspaceTab = document.querySelector("#workspaceTab");
 const libraryTab = document.querySelector("#libraryTab");
-const agentTab = document.querySelector("#agentTab");
+const workTabRef = document.querySelector("#workTab");
+const legacyAgentWorksToggle = document.querySelector("#legacyAgentWorksToggle");
+const workPane = document.querySelector("#workPane");
+const workHome = document.querySelector("#workHome");
+const workDetail = document.querySelector("#workDetail");
+const workContextViewButton = document.querySelector("#workContextViewButton");
+const workEvidenceViewButton = document.querySelector("#workEvidenceViewButton");
+const workContextStream = document.querySelector("#workContextStream");
+const workEvidenceStream = document.querySelector("#workEvidenceStream");
+const workEvidenceCount = document.querySelector("#workEvidenceCount");
 const addLibrarySourceButton = document.querySelector("#addLibrarySource");
 const newAgentWorkButton = document.querySelector("#newAgentWorkButton");
 const libraryMeta = document.querySelector("#libraryMeta");
@@ -40,8 +49,8 @@ const addFeedDialog = document.querySelector("#addFeedDialog");
 const addFeedForm = document.querySelector("#addFeedForm");
 const addFeedUrl = document.querySelector("#addFeedUrl");
 const cancelAddFeed = document.querySelector("#cancelAddFeed");
-const agentMeta = document.querySelector("#agentMeta");
-const agentStats = document.querySelector("#agentStats");
+const workMetaEl = document.querySelector("#workMeta");
+const workStatsEl = document.querySelector("#workStats");
 const worksetBar = document.querySelector("#worksetBar");
 const worksetCount = document.querySelector("#worksetCount");
 const clearWorksetButton = document.querySelector("#clearWorkset");
@@ -86,6 +95,7 @@ const AnnotationCodec = window.StillwriteAnnotations;
 const DocumentLinks = window.StillwriteDocumentLinks;
 const AgentEvents = window.StillwriteAgentEvents;
 const Feeds = window.StillwriteFeeds;
+const WorkView = window.StillwriteWorkView;
 const agentAskDialog = document.querySelector("#agentAskDialog");
 const agentAskForm = document.querySelector("#agentAskForm");
 const agentAskTitle = document.querySelector("#agentAskTitle");
@@ -110,7 +120,18 @@ let currentFile = null;
 let currentLibraryDocument = null;
 let currentAgentDocument = null;
 let libraryMode = false;
-let agentMode = false;
+let workMode = false;
+// Work 视图状态：works 表数据（真实 M1 数据，不用 mock）、当前选中的 Work、
+// 「旧 Agent 工作」兼容子视图、Work 中栏 Surface 是否可见、5s 轮询。
+let workItems = [];
+let currentWork = null;
+let legacyAgentView = false;
+let workSurfaceActive = false;
+let workPollTimer = null;
+let workEvidenceToken = 0;
+// 当前 Work 的证据缓存：work.* 事件（倒序）+ receipt 存在性探针结果。
+let workEventCache = [];
+let receiptProbe = null;
 let librarySources = [];
 let libraryStatsData = { total_documents: 0, unique_documents: 0 };
 let feedSources = [];
@@ -132,6 +153,18 @@ let splitRatio = Number(localStorage.getItem("stillwrite.splitRatio") || 50);
 let sidebarVisible =
 	localStorage.getItem("stillwrite.sidebarVisible") !== "false";
 let viewMode = localStorage.getItem("stillwrite.viewMode") || "split";
+// 写|双|读 document-local（M3）：每个文档记住自己的视图模式，
+// localStorage 只存展示偏好（AGENTS §2.1 允许），默认回退 split。
+let viewModesByDocument = (() => {
+	try {
+		const parsed = JSON.parse(
+			localStorage.getItem("stillwrite.viewModes") || "{}",
+		);
+		return parsed && typeof parsed === "object" ? parsed : {};
+	} catch (_) {
+		return {};
+	}
+})();
 let loadToken = 0;
 
 let annotateVisible =
@@ -267,7 +300,7 @@ function isWorkspaceDocumentForRelated() {
 			!currentLibraryDocument &&
 			!currentAgentDocument &&
 			!libraryMode &&
-			!agentMode,
+			!workMode,
 	);
 }
 
@@ -831,27 +864,35 @@ function renderWebSearchToolbar() {
 }
 
 function setSupportView(view) {
-	supportView = ["related", "web-search"].includes(view)
+	supportView = ["related", "web-search", "work-context", "work-evidence"].includes(view)
 		? view
 		: "annotation";
 	const related = supportView === "related";
 	const webSearch = supportView === "web-search";
-	annotationViewButton.classList.toggle("active", !related && !webSearch);
+	const workContext = supportView === "work-context";
+	const workEvidence = supportView === "work-evidence";
+	const documentView = !related && !webSearch && !workContext && !workEvidence;
+	annotationViewButton.classList.toggle("active", documentView);
 	relatedViewButton.classList.toggle("active", related);
 	webSearchViewButton.classList.toggle("active", webSearch);
-	annotationViewButton.setAttribute(
-		"aria-selected",
-		String(!related && !webSearch),
-	);
+	workContextViewButton.classList.toggle("active", workContext);
+	workEvidenceViewButton.classList.toggle("active", workEvidence);
+	annotationViewButton.setAttribute("aria-selected", String(documentView));
 	relatedViewButton.setAttribute("aria-selected", String(related));
 	webSearchViewButton.setAttribute("aria-selected", String(webSearch));
-	newAnnotationButton.hidden = related || webSearch;
-	annotateStream.hidden = related || webSearch;
-	annotateFooter.hidden = related || webSearch;
+	workContextViewButton.setAttribute("aria-selected", String(workContext));
+	workEvidenceViewButton.setAttribute("aria-selected", String(workEvidence));
+	newAnnotationButton.hidden = documentView ? false : true;
+	annotateStream.hidden = !documentView;
+	annotateFooter.hidden = !documentView;
 	relatedStream.hidden = !related;
 	webSearchStream.hidden = !webSearch;
+	workContextStream.hidden = !workContext;
+	workEvidenceStream.hidden = !workEvidence;
 	if (related) renderRelatedPanel();
 	if (webSearch) renderWebSearchState();
+	if (workContext) renderWorkContextPanel();
+	if (workEvidence) renderWorkEvidencePanel();
 }
 
 function renderRelatedPanel() {
@@ -1275,7 +1316,7 @@ function handleAgentEvent(envelope) {
 	const run = localAgentRuns.find((item) => item.id === runId);
 	if (!run || !AgentEvents) return;
 	Object.assign(run, AgentEvents.applyAgentEvent(run, payload));
-	if (agentMode) renderAgentWorks();
+	if (workMode && legacyAgentView) renderAgentWorks();
 	if (AgentEvents.TERMINAL_EVENTS.has(payload.type)) {
 		const waiter = agentRunWaiters.get(runId);
 		if (waiter) {
@@ -1690,7 +1731,7 @@ async function saveCurrent() {
 		}
 		markSaved();
 		if (currentFile && autoSync) scheduleAutoSync();
-		if (agentMode) await loadAgentWorks();
+		if (workMode && legacyAgentView) await loadAgentWorks();
 	} catch (error) {
 		console.error(error);
 		markError("保存失败");
@@ -2121,45 +2162,49 @@ async function addLibrarySource() {
 
 async function setSidebarMode(mode) {
 	const nextLibraryMode = mode === "library";
-	const nextAgentMode = mode === "agent";
-	if (libraryMode === nextLibraryMode && agentMode === nextAgentMode) {
-		if (agentMode) await loadAgentWorks();
+	const nextWorkMode = mode === "work";
+	if (libraryMode === nextLibraryMode && workMode === nextWorkMode) {
+		if (workMode && !legacyAgentView) await loadWorks();
 		return;
 	}
 	clearWebSearch();
 	libraryMode = nextLibraryMode;
-	agentMode = nextAgentMode;
-	workspaceTab.classList.toggle("active", !libraryMode && !agentMode);
+	workMode = nextWorkMode;
+	legacyAgentView = false;
+	currentWork = null;
+	workspaceTab.classList.toggle("active", !libraryMode && !workMode);
 	libraryTab.classList.toggle("active", libraryMode);
-	agentTab.classList.toggle("active", agentMode);
+	workTabRef.classList.toggle("active", workMode);
 	workspaceTab.setAttribute(
 		"aria-selected",
-		String(!libraryMode && !agentMode),
+		String(!libraryMode && !workMode),
 	);
 	libraryTab.setAttribute("aria-selected", String(libraryMode));
-	agentTab.setAttribute("aria-selected", String(agentMode));
+	workTabRef.setAttribute("aria-selected", String(workMode));
 	addLibrarySourceButton.hidden = !libraryMode;
-	newAgentWorkButton.hidden = !agentMode;
+	newAgentWorkButton.hidden = !workMode;
 	libraryMeta.hidden = !libraryMode;
-	agentMeta.hidden = !agentMode;
+	workMetaEl.hidden = !workMode;
+	legacyAgentWorksToggle.textContent = "旧 Agent 工作";
 	searchInput.placeholder = libraryMode
 		? "搜索资料库…"
-		: agentMode
-			? "搜索 Agent 工作…"
+		: workMode
+			? "搜索工作…"
 			: "搜索全文（FTS）…";
 	searchInput.value = "";
 	clearTimeout(searchTimer);
-	if (libraryMode || agentMode) clearRelated();
+	if (libraryMode || workMode) clearRelated();
 	else if (isWorkspaceDocumentForRelated()) scheduleRelatedRefresh(0);
 	renderCitationSummary();
+	stopWorkPolling();
+	setWorkSurface(workMode);
 	if (libraryMode) {
 		if (!librarySources.length) await refreshLibrary();
 		else renderLibraryHome();
 		await loadFeedStatus();
 		maybeAutoRefreshFeeds();
-	} else if (agentMode) {
-		await loadHistoricAgentFailures();
-		await loadAgentWorks();
+	} else if (workMode) {
+		await loadWorks();
 	} else if (lastTreeNodes.length) {
 		renderTree(lastTreeNodes);
 	} else {
@@ -2190,6 +2235,8 @@ async function useWorkspace(data) {
 	aggregateButton.disabled = false;
 	currentLibraryDocument = null;
 	currentAgentDocument = null;
+	workSurfaceActive = false;
+	loadViewModeForCurrentDocument();
 	rootPath = data.root;
 	relatedPinsHydratedScope = null; // 换工作区必须重新水合对应的固定关联
 	localStorage.setItem("stillwrite.rootPath", rootPath);
@@ -2200,6 +2247,8 @@ async function useWorkspace(data) {
 	renderTree(data.nodes);
 	await hydrateRelatedPins();
 	await loadWebSearchHistory();
+	// works 按 workspace_id 隔离：换工作区后重查当前工作区的工作
+	if (workMode && !legacyAgentView) await loadWorks();
 }
 
 async function chooseWorkspace() {
@@ -2261,9 +2310,13 @@ async function refreshTree() {
 		await loadFeedStatus();
 		return;
 	}
-	if (agentMode) {
-		await loadHistoricAgentFailures();
-		await loadAgentWorks();
+	if (workMode) {
+		if (legacyAgentView) {
+			await loadHistoricAgentFailures();
+			await loadAgentWorks();
+		} else {
+			await loadWorks();
+		}
 		return;
 	}
 	if (!rootPath) return;
@@ -2336,6 +2389,7 @@ async function openLibraryDocument(hit) {
 		editor.scrollTop = 0;
 		previewEl.scrollTop = 0;
 		markReadonly();
+		loadViewModeForCurrentDocument();
 		await loadAnnotationPanel();
 		await loadWebSearchHistory();
 	} catch (error) {
@@ -2366,14 +2420,540 @@ function showDocument(path, name, text, row) {
 	editor.scrollTop = 0;
 	previewEl.scrollTop = 0;
 	markSaved();
+	loadViewModeForCurrentDocument();
 	loadAnnotationPanel();
 	scheduleRelatedRefresh(0);
 	void loadWebSearchHistory();
 }
 
+// ---------------------------------------------------------------------------
+// Work Home（M3 Shell）：三组列表 + Work 详情 Surface。
+// 数据全部来自 works 表（list_works / work_events / work_receipt_probe），
+// 不用 mock；分组/badge/时间由 StillwriteWorkView 纯函数给出。
+// ---------------------------------------------------------------------------
+
+async function loadWorks() {
+	if (!rootPath) {
+		workItems = [];
+		renderWorkList();
+		renderWorkCenter();
+		return;
+	}
+	try {
+		workItems = await invoke("list_works", { limit: null });
+	} catch (error) {
+		console.error("读取工作失败", error);
+		workItems = [];
+	}
+	if (currentWork) {
+		currentWork =
+			workItems.find((item) => item.id === currentWork.id) || currentWork;
+	}
+	renderWorkList();
+	renderWorkCenter();
+	if (WorkView.activeCount(workItems) > 0) startWorkPolling();
+	else stopWorkPolling();
+}
+
+function workListRows() {
+	const query = searchInput.value.trim();
+	return query
+		? workItems.filter((item) => WorkView.rowMatches(item, query))
+		: workItems;
+}
+
+function renderWorkList() {
+	treeEl.replaceChildren();
+	const rows = workListRows();
+	const groups = WorkView.groupWorks(rows);
+	workStatsEl.textContent = rows.length
+		? `${WorkView.groupWorks(workItems).reduce((sum, group) => sum + group.items.length, 0)} 个工作 · ${WorkView.activeCount(workItems)} 个进行中`
+		: "还没有工作";
+	if (!rows.length) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip agent-empty-tip";
+		tip.textContent = searchInput.value.trim()
+			? "没有匹配的工作"
+			: "还没有工作。选中文字后点「问 Agent」，或点右上角 ＋ 发起新工作。";
+		treeEl.appendChild(tip);
+		return;
+	}
+	const fragment = document.createDocumentFragment();
+	for (const group of groups) {
+		if (!group.items.length) continue; // 空组不渲染标题
+		const head = document.createElement("div");
+		head.className = "work-group-head";
+		head.textContent = `${group.title} · ${group.items.length}`;
+		fragment.appendChild(head);
+		for (const record of group.items) {
+			fragment.appendChild(renderWorkRow(record));
+		}
+	}
+	treeEl.appendChild(fragment);
+}
+
+function renderWorkRow(record) {
+	const row = WorkView.rowModel(record);
+	const item = document.createElement("div");
+	item.className = `agent-work-item work-item work-tone-${row.badge.tone}${currentWork?.id === row.id ? " active" : ""}`;
+	const open = document.createElement("button");
+	open.type = "button";
+	open.className = "agent-work-open work-row-open";
+	const head = document.createElement("span");
+	head.className = "work-row-head";
+	const badge = document.createElement("span");
+	badge.className = `work-badge work-badge-${row.badge.tone}`;
+	badge.textContent = row.badge.label;
+	const title = document.createElement("strong");
+	title.className = "agent-work-title";
+	title.textContent = row.title;
+	const time = document.createElement("span");
+	time.className = "work-row-time";
+	time.textContent = row.relativeTime;
+	head.append(badge, title, time);
+	const meta = document.createElement("span");
+	meta.className = "agent-work-meta";
+	meta.textContent = row.summary || (row.nextAction ? `下一步：${row.nextAction}` : "");
+	open.append(head, meta);
+	open.addEventListener("click", () => void openWorkDetail(record));
+	item.appendChild(open);
+	return item;
+}
+
+/** Work Surface 显隐：data-mode="work" 时中栏只显示 Work 面板。 */
+function setWorkSurface(active) {
+	workSurfaceActive = Boolean(active);
+	if (workSurfaceActive) {
+		setWorkSupportChrome(true);
+		if (supportView !== "work-context" && supportView !== "work-evidence") {
+			setSupportView("work-context");
+		}
+	} else {
+		setWorkSupportChrome(false);
+		if (supportView === "work-context" || supportView === "work-evidence") {
+			setSupportView("annotation");
+		}
+	}
+	renderWorkCenter();
+	applyLayout();
+}
+
+function renderWorkCenter() {
+	if (!workSurfaceActive) {
+		workHome.hidden = true;
+		workDetail.hidden = true;
+		return;
+	}
+	if (!currentWork) {
+		renderWorkHomeCenter();
+		return;
+	}
+	renderWorkDetailView();
+}
+
+function renderWorkHomeCenter() {
+	workDetail.hidden = true;
+	workHome.hidden = false;
+	const groups = WorkView.groupWorks(workItems);
+	workHome.replaceChildren();
+	const title = document.createElement("h2");
+	title.className = "work-home-title";
+	title.textContent = "工作";
+	const subtitle = document.createElement("p");
+	subtitle.className = "work-home-subtitle";
+	subtitle.textContent = rootPath
+		? "今天有什么在推进、什么需要你，一眼可见。"
+		: "先从「文件」菜单打开一个文件夹，工作会记录在这里。";
+	workHome.append(title, subtitle);
+	const counts = document.createElement("div");
+	counts.className = "work-home-counts";
+	for (const group of groups) {
+		const card = document.createElement("div");
+		card.className = "work-home-count";
+		const number = document.createElement("strong");
+		number.textContent = String(group.items.length);
+		const label = document.createElement("span");
+		label.textContent = group.title;
+		card.append(number, label);
+		counts.appendChild(card);
+	}
+	workHome.appendChild(counts);
+	if (rootPath) {
+		const ask = document.createElement("button");
+		ask.type = "button";
+		ask.className = "primary-btn work-home-ask";
+		ask.textContent = "发起 Agent 工作";
+		ask.title = "与选区「问 Agent」相同的入口";
+		ask.addEventListener("click", () =>
+			void beginAgentQuestion(null, { allowEmpty: true }),
+		);
+		workHome.appendChild(ask);
+	}
+}
+
+function renderWorkDetailView() {
+	workHome.hidden = true;
+	const record = currentWork;
+	if (!record) return;
+	const detail = WorkView.detailModel(record, workEventCache, receiptProbe);
+	workDetail.hidden = false;
+	workDetail.replaceChildren();
+
+	const back = document.createElement("button");
+	back.type = "button";
+	back.className = "text-btn work-detail-back";
+	back.textContent = "← 返回工作";
+	back.addEventListener("click", () => closeWorkDetail());
+
+	const head = document.createElement("div");
+	head.className = "work-detail-head";
+	const badge = document.createElement("span");
+	badge.className = `work-badge work-badge-${detail.status.tone}`;
+	badge.textContent = detail.status.label;
+	const title = document.createElement("h3");
+	title.className = "work-detail-title";
+	title.textContent = detail.title;
+	head.append(badge, title);
+
+	const actions = document.createElement("div");
+	actions.className = "work-detail-actions";
+	if (detail.canAccept) {
+		const accept = document.createElement("button");
+		accept.type = "button";
+		accept.className = "primary-btn";
+		accept.textContent = "接受完成";
+		accept.title = "人工明确接受后工作才算 completed";
+		accept.addEventListener("click", () => void acceptWork(record.id));
+		actions.appendChild(accept);
+	}
+	if (detail.canCancel) {
+		const cancel = document.createElement("button");
+		cancel.type = "button";
+		cancel.className = "text-btn";
+		cancel.textContent = "取消";
+		cancel.title = "运行中的工作会同时停止 Pi 进程";
+		cancel.addEventListener("click", () => void cancelWorkAction(record.id));
+		actions.appendChild(cancel);
+	}
+
+	const body = document.createElement("div");
+	body.className = "work-detail-body";
+	body.appendChild(workDetailSection("目标", detail.intent || "（未记录）"));
+	if (detail.statusLine) {
+		const reason = detail.statusLine.reason
+			? `（${detail.statusLine.reason}）`
+			: "";
+		body.appendChild(
+			workDetailSection(
+				"状态变化",
+				`${detail.statusLine.text}${reason}`,
+			),
+		);
+	}
+	body.appendChild(
+		workDetailSection(
+			"下一步",
+			detail.nextAction ||
+				(record.status === "needs_human" ? "等待人工验收" : "—"),
+		),
+	);
+	const artifactValue = document.createElement("span");
+	if (detail.artifact?.id) {
+		const link = document.createElement("button");
+		link.type = "button";
+		link.className = "text-btn work-artifact-link";
+		link.textContent = "打开成果文档";
+		link.title = detail.artifact.uri;
+		link.addEventListener("click", () => void openWorkArtifact(detail.artifact.id));
+		artifactValue.appendChild(link);
+	} else {
+		artifactValue.textContent = "尚无成果";
+		artifactValue.className = "work-muted";
+	}
+	body.appendChild(workDetailSection("成果", null, artifactValue));
+	body.appendChild(
+		workDetailSection(
+			"证据",
+			null,
+			workEvidenceSummaryNode(detail),
+		),
+	);
+
+	workDetail.append(back, head, actions, body);
+}
+
+function workDetailSection(label, text, node = null) {
+	const section = document.createElement("div");
+	section.className = "work-detail-section";
+	const key = document.createElement("div");
+	key.className = "work-detail-key";
+	key.textContent = label;
+	section.appendChild(key);
+	if (node) {
+		section.appendChild(node);
+	} else {
+		const value = document.createElement("div");
+		value.className = "work-detail-value";
+		value.textContent = text;
+		section.appendChild(value);
+	}
+	return section;
+}
+
+function workEvidenceSummaryNode(detail) {
+	const box = document.createElement("div");
+	const receipt = document.createElement("div");
+	receipt.className = "work-detail-value";
+	if (!detail.receipt.ref) {
+		receipt.textContent = "无运行收据引用";
+	} else {
+		const marker =
+			detail.receipt.exists === null
+				? "检查中…"
+				: detail.receipt.exists
+					? "运行收据在档"
+					: "运行收据缺失";
+		receipt.textContent = `receipt ${detail.receipt.ref} · ${marker}`;
+		receipt.classList.toggle("work-muted", detail.receipt.exists === false);
+	}
+	box.appendChild(receipt);
+	const hint = document.createElement("div");
+	hint.className = "work-muted work-evidence-hint";
+	hint.textContent = "完整事件见右侧「证据」。";
+	box.appendChild(hint);
+	return box;
+}
+
+function closeWorkDetail() {
+	currentWork = null;
+	workEventCache = [];
+	receiptProbe = null;
+	workEvidenceCount.textContent = "0";
+	renderWorkList();
+	renderWorkCenter();
+}
+
+async function openWorkDetail(record) {
+	currentWork = record;
+	workEventCache = [];
+	receiptProbe = null;
+	workEvidenceCount.textContent = "0";
+	if (!workSurfaceActive) setWorkSurface(true);
+	else renderWorkCenter();
+	if (!annotateVisible) setAnnotateVisible(true); // 右栏：上下文 | 证据
+	renderWorkList();
+	await refreshWorkEvidence(record.id);
+}
+
+async function openWorkArtifact(agentWorkId) {
+	if (!agentWorkId) return;
+	// 复用现有 Agent Work Markdown 打开路径（可编辑 Artifact）
+	await openAgentWork({ id: agentWorkId });
+}
+
+async function refreshWorkEvidence(workId) {
+	const token = ++workEvidenceToken;
+	const record = currentWork;
+	if (!record || record.id !== workId) return;
+	const results = await Promise.all([
+		invoke("work_events", { workId, limit: null }).catch((error) => {
+			console.error("读取工作事件失败", error);
+			return [];
+		}),
+		record.receipt_ref
+			? invoke("work_receipt_probe", { receiptRef: record.receipt_ref }).catch(
+					() => null,
+				)
+			: Promise.resolve(null),
+	]);
+	if (token !== workEvidenceToken || currentWork?.id !== workId) return;
+	workEventCache = results[0] || [];
+	receiptProbe = results[1];
+	workEvidenceCount.textContent = String(workEventCache.length);
+	renderWorkContextPanel();
+	renderWorkEvidencePanel();
+	renderWorkCenter();
+}
+
+function renderWorkContextPanel() {
+	workContextStream.replaceChildren();
+	if (!currentWork) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip";
+		tip.textContent = "尚未选择工作。";
+		workContextStream.appendChild(tip);
+		return;
+	}
+	const detail = WorkView.detailModel(
+		currentWork,
+		workEventCache,
+		receiptProbe,
+	);
+	const intent = document.createElement("div");
+	intent.className = "work-panel-block";
+	const intentKey = document.createElement("div");
+	intentKey.className = "work-detail-key";
+	intentKey.textContent = "目标（人的意图，不被 Agent 改写）";
+	const intentValue = document.createElement("div");
+	intentValue.className = "work-detail-value work-prewrap";
+	intentValue.textContent = detail.intent || "（未记录）";
+	intent.append(intentKey, intentValue);
+	const meta = document.createElement("div");
+	meta.className = "work-panel-block";
+	const metaKey = document.createElement("div");
+	metaKey.className = "work-detail-key";
+	metaKey.textContent = "当前状态";
+	const metaValue = document.createElement("div");
+	metaValue.className = "work-detail-value";
+	metaValue.textContent = `${detail.status.label}${detail.statusLine ? ` · ${detail.statusLine.text}` : ""}${detail.nextAction ? ` · 下一步：${detail.nextAction}` : ""}`;
+	meta.append(metaKey, metaValue);
+	workContextStream.append(intent, meta);
+}
+
+function renderWorkEvidencePanel() {
+	workEvidenceStream.replaceChildren();
+	const detail = currentWork
+		? WorkView.detailModel(currentWork, workEventCache, receiptProbe)
+		: null;
+	if (!detail) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip";
+		tip.textContent = "尚未选择工作。";
+		workEvidenceStream.appendChild(tip);
+		return;
+	}
+	// 当前 Pi 证据只允许：Artifact、receipt、session ref、runtime settlement/failure、
+	// Work events。没有真实 adapter 就不显示 tests/diff/commit。
+	const receipt = document.createElement("div");
+	receipt.className = "work-panel-block";
+	const receiptKey = document.createElement("div");
+	receiptKey.className = "work-detail-key";
+	receiptKey.textContent = "运行收据";
+	const receiptValue = document.createElement("div");
+	receiptValue.className = "work-detail-value";
+	receiptValue.textContent = detail.receipt.ref
+		? `${detail.receipt.ref} · ${detail.receipt.exists === null ? "检查中…" : detail.receipt.exists ? "在档" : "缺失"}`
+		: "无运行收据引用";
+	receipt.append(receiptKey, receiptValue);
+	const events = document.createElement("div");
+	events.className = "work-panel-block";
+	const eventsKey = document.createElement("div");
+	eventsKey.className = "work-detail-key";
+	eventsKey.textContent = `工作事件 · ${workEventCache.length}`;
+	events.appendChild(eventsKey);
+	if (!workEventCache.length) {
+		const empty = document.createElement("div");
+		empty.className = "work-detail-value work-muted";
+		empty.textContent = "暂无事件";
+		events.appendChild(empty);
+	}
+	for (const event of detail.events) {
+		const line = document.createElement("div");
+		line.className = "work-event-line";
+		const action = document.createElement("span");
+		action.className = "work-event-action";
+		action.textContent = event.action;
+		const time = document.createElement("span");
+		time.className = "work-event-time";
+		time.textContent = event.time;
+		line.append(action, time);
+		if (event.reason) {
+			const reason = document.createElement("div");
+			reason.className = "work-event-reason";
+			reason.textContent = event.reason;
+			line.appendChild(reason);
+		}
+		events.appendChild(line);
+	}
+	workEvidenceStream.append(receipt, events);
+}
+
+async function acceptWork(workId) {
+	try {
+		const updated = await invoke("work_accept", { workId });
+		await refreshWorksAfterAction(updated);
+	} catch (error) {
+		console.error(error);
+		markError(`接受失败：${shortAgentError(error)}`);
+	}
+}
+
+async function cancelWorkAction(workId) {
+	try {
+		const updated = await invoke("work_cancel", { workId });
+		await refreshWorksAfterAction(updated);
+	} catch (error) {
+		console.error(error);
+		markError(`取消失败：${shortAgentError(error)}`);
+	}
+}
+
+async function refreshWorksAfterAction(updated) {
+	if (updated && currentWork?.id === updated.id) currentWork = updated;
+	await loadWorks();
+	if (currentWork) await refreshWorkEvidence(currentWork.id);
+	if (workMode && legacyAgentView) renderAgentWorks();
+}
+
+function startWorkPolling() {
+	if (workPollTimer || !workMode || legacyAgentView) return;
+	workPollTimer = setInterval(() => {
+		if (!workMode || legacyAgentView || document.hidden) return;
+		if (WorkView.activeCount(workItems) === 0) {
+			stopWorkPolling();
+			return;
+		}
+		void loadWorks();
+	}, 5000);
+}
+
+function stopWorkPolling() {
+	if (workPollTimer) {
+		clearInterval(workPollTimer);
+		workPollTimer = null;
+	}
+}
+
+/** 「旧 Agent 工作」兼容入口：迁移期间旧列表保持可达，不先删后迁。 */
+async function toggleLegacyAgentWorks() {
+	legacyAgentView = !legacyAgentView;
+	legacyAgentWorksToggle.textContent = legacyAgentView
+		? "返回工作"
+		: "旧 Agent 工作";
+	if (legacyAgentView) {
+		currentWork = null;
+		workEventCache = [];
+		receiptProbe = null;
+		setWorkSurface(false);
+		stopWorkPolling();
+		await loadHistoricAgentFailures();
+		await loadAgentWorks();
+	} else {
+		setWorkSurface(true);
+		await loadWorks();
+	}
+}
+
+/** Work Surface 下右栏切换为 上下文|证据；文档批注/关联/搜索入口隐藏。 */
+function setWorkSupportChrome(workVisible) {
+	const docTabs = [
+		annotationViewButton,
+		relatedViewButton,
+		webSearchViewButton,
+	];
+	const workTabs = [workContextViewButton, workEvidenceViewButton];
+	for (const tab of docTabs) tab.hidden = workVisible;
+	for (const tab of workTabs) tab.hidden = !workVisible;
+	if (!workVisible) return; // 离开时由 setSupportView 按当前视图恢复
+	newAnnotationButton.hidden = true;
+	annotateFooter.hidden = true;
+	annotateDocName.textContent = currentWork?.title || "工作";
+	annotateDocPath.textContent = "";
+}
+
 function renderAgentWorks(items = allAgentWorkItems()) {
 	treeEl.replaceChildren();
-	agentStats.textContent = agentWorkItems.length
+	workStatsEl.textContent = agentWorkItems.length
 		? `${agentWorkItems.length} 个工作${localAgentRuns.length ? ` · ${localAgentRuns.length} 个运行中` : ""}`
 		: localAgentRuns.length
 			? `${localAgentRuns.length} 个运行中`
@@ -2527,6 +3107,8 @@ function showAgentDocument(data) {
 	currentAgentDocument = data;
 	currentFile = null;
 	currentLibraryDocument = null;
+	// Agent Work 是中栏 Markdown Surface：退出 Work Surface（仍在「工作」标签）
+	workSurfaceActive = false;
 	editor.readOnly = false;
 	editor.classList.remove("readonly");
 	editorPaneLabel.textContent = "WRITE · AGENT";
@@ -2540,7 +3122,8 @@ function showAgentDocument(data) {
 	markSaved();
 	loadAnnotationPanel();
 	void loadWebSearchHistory();
-	if (agentMode) renderAgentWorks();
+	loadViewModeForCurrentDocument();
+	if (workMode && legacyAgentView) renderAgentWorks();
 }
 
 async function createFile(relativePath) {
@@ -2936,7 +3519,7 @@ async function submitAgentQuestion(event) {
 	activeAgentRunId = run.id;
 	agentBusy = true;
 	agentCancelRequested = false;
-	if (agentMode) renderAgentWorks();
+	if (workMode && legacyAgentView) renderAgentWorks();
 	saveStateEl.textContent = "Agent 运行中…";
 	saveStateEl.classList.remove("error");
 	const completion = waitForAgentRun(run.id);
@@ -2995,7 +3578,8 @@ async function submitAgentQuestion(event) {
 		});
 		addCompletedAgentWork(document);
 		localAgentRuns = localAgentRuns.filter((item) => item.id !== run.id);
-		if (agentMode) renderAgentWorks();
+		if (workMode && legacyAgentView) renderAgentWorks();
+		if (workMode) void loadWorks();
 		saveStateEl.textContent = "Agent 工作已完成";
 	} catch (error) {
 		console.error("Agent 工作失败", error);
@@ -3007,7 +3591,8 @@ async function submitAgentQuestion(event) {
 			local.error = String(error);
 			local.updatedAt = Math.floor(Date.now() / 1000);
 		}
-		if (agentMode) renderAgentWorks();
+		if (workMode && legacyAgentView) renderAgentWorks();
+		if (workMode) void loadWorks();
 		markError(
 			agentCancelRequested ? "Agent 已停止" : `Agent 失败：${shortAgentError(error)}`,
 		);
@@ -3017,7 +3602,7 @@ async function submitAgentQuestion(event) {
 		activeAgentRunId = null;
 		agentCancelRequested = false;
 		pendingAgentRequest = null;
-		if (agentMode) renderAgentWorks();
+		if (workMode && legacyAgentView) renderAgentWorks();
 	}
 }
 
@@ -3549,8 +4134,9 @@ function clearSearch() {
 	searchInput.value = "";
 	if (libraryMode) {
 		renderLibraryHome();
-	} else if (agentMode) {
-		renderAgentWorks();
+	} else if (workMode) {
+		if (legacyAgentView) renderAgentWorks();
+		else renderWorkList();
 	} else if (lastTreeNodes.length) {
 		renderTree(lastTreeNodes);
 	} else {
@@ -3568,8 +4154,9 @@ async function runSearch() {
 		if (libraryMode) {
 			const hits = await invoke("search_library", { query, limit: 30 });
 			renderLibrarySearchResults(hits);
-		} else if (agentMode) {
-			await loadAgentWorks();
+		} else if (workMode) {
+			if (legacyAgentView) await loadAgentWorks();
+			else await loadWorks();
 		} else {
 			const hits = await invoke("search_index", { query, limit: 30 });
 			renderSearchResults(hits);
@@ -3891,14 +4478,37 @@ function applyLayout() {
 	annotatePanel.hidden = !annotateVisible;
 	annotationButton.classList.toggle("active", annotateVisible);
 	updateRightPanelHandle();
-	shell.dataset.mode = viewMode;
+	// M3 Shell：Work Surface（工作标签下未进入 Markdown 时）占据中栏
+	shell.dataset.mode = workSurfaceActive ? "work" : viewMode;
+	workPane.classList.toggle("hidden", !workSurfaceActive);
 	document.querySelectorAll("[data-view]").forEach((button) => {
 		button.classList.toggle("active", button.dataset.view === viewMode);
 	});
 }
 
+function documentViewKey() {
+	const ref = currentDocumentRef();
+	const key = ref ? documentRefKey(ref) : null;
+	return key || "default";
+}
+
+/** 切换文档时恢复该文档自己的 写|双|读 模式（document-local）。 */
+function loadViewModeForCurrentDocument() {
+	viewMode =
+		viewModesByDocument[documentViewKey()] ||
+		localStorage.getItem("stillwrite.viewMode") ||
+		"split";
+	applyLayout();
+}
+
 function setViewMode(mode) {
 	viewMode = mode;
+	viewModesByDocument[documentViewKey()] = mode;
+	localStorage.setItem(
+		"stillwrite.viewModes",
+		JSON.stringify(viewModesByDocument),
+	);
+	// 兼容旧默认：新文档未显式选择前的回退值
 	localStorage.setItem("stillwrite.viewMode", mode);
 	applyLayout();
 }
@@ -4004,7 +4614,10 @@ document
 document.querySelector("#refreshTree").addEventListener("click", refreshTree);
 workspaceTab.addEventListener("click", () => void setSidebarMode("workspace"));
 libraryTab.addEventListener("click", () => void setSidebarMode("library"));
-agentTab.addEventListener("click", () => void setSidebarMode("agent"));
+workTabRef.addEventListener("click", () => void setSidebarMode("work"));
+legacyAgentWorksToggle.addEventListener("click", () => void toggleLegacyAgentWorks());
+workContextViewButton.addEventListener("click", () => setSupportView("work-context"));
+workEvidenceViewButton.addEventListener("click", () => setSupportView("work-evidence"));
 addLibrarySourceButton.addEventListener("click", () => {
 	setSourceMenuOpen(sourceMenu.hidden);
 });
@@ -4251,4 +4864,6 @@ applyLayout();
 void installAgentEventListener().catch((error) => {
 	console.warn("Cannot subscribe to Agent events", error);
 });
+// M3：默认启动进入 Work Home
+void setSidebarMode("work");
 restoreWorkspace();
