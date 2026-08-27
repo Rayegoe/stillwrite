@@ -8,7 +8,7 @@ UI 只负责把 canonical state 呈现给人。
 
 ## 2. Primary Navigation
 
-当前保持：
+当前实现保持兼容入口：
 
 ```text
 文件 | 资料 | Agent
@@ -27,6 +27,14 @@ UI 只负责把 canonical state 呈现给人。
 Thread / Work / Agent history 的入口。
 
 这三个是“对象来源/工作平面”。
+
+vNext Workbench 的目标入口为：
+
+```text
+工作 | 资料 | 文件
+```
+
+其中 `Agent` 不再是一级平面；Agent 作为 Work 的 Actor 出现在 Work/Run projection 中。旧 Agent 列表在迁移期间保留为兼容路径，不能先删除再迁移数据。
 
 ## 3. View Mode
 
@@ -72,6 +80,14 @@ playable
 ```
 
 `联网搜索` 将选区发送到 Brave Search API，在右侧支持栏的“搜索”视图把每次搜索保留为历史条目，与“批注”“关联”并列；点击历史条目展开已保存的网页结果，可重新打开网页或关联当前笔记。API 密钥通过左下角设置由后端保存，未保存时回退到环境变量；搜索历史和结果快照写入应用数据目录的 `state.db`，不写入 Markdown。
+
+因此 Document Context 的稳定 projection 是：
+
+```text
+批注 | 关联 | 搜索
+```
+
+搜索是文档上下文中的 durable projection，不是 Agent 对话入口，也不是新的一级导航。
 
 ## 5. Library
 
@@ -236,6 +252,22 @@ Codex
 - next actions
 - raw trace（必要时）
 
+### Work / Run status boundary
+
+Work 状态表达协调结果：
+
+```text
+queued | running | needs_human | blocked | completed | failed | cancelled
+```
+
+Run 状态表达一次执行：
+
+```text
+queued | running | succeeded | failed | cancelled
+```
+
+Run `succeeded` 只有在 Work 的验收条件满足时才会促成 `completed`；否则 Work 可以进入 `needs_human`、继续 `running` 或等待下一次 Run。`needs_human` 和 `blocked` 不属于 Run 状态。
+
 ## 11. Long-Term Three Projection Families
 
 内部可逐渐归纳为：
@@ -253,3 +285,27 @@ Codex
 依据、关系、记忆、证据是什么？
 
 当前不需要立即把 UI 改名成这三项，但所有新界面应能映射到其中之一。
+
+## 12. URI 与 legacy Agent Work bridge
+
+canonical URI：
+
+```text
+agent://<workspace-key>/<id>  (legacy)   legacy Agent Work sidecar URI（匹配时映射到 agentwork://...）
+agentwork://<workspace-key>/<id>         Agent Work Markdown Artifact
+work://<work-id>                         Work
+run://<run-id>                           Run
+```
+
+`agent://` 暂时整体保持 legacy/reserved，本阶段不重定义为 Agent Actor（Agent Actor 的 canonical URI 待定义）。旧 Agent Work 使用双段 `agent://<workspace-key>/<id>`；只有匹配 legacy sidecar 时才按 Agent Work 解释，并在 projection 中显示为 `agentwork://...`。旧 Markdown/JSON 不重写。
+
+桥接以 `(workspace_id, legacy_agent_work_id)` 幂等：
+
+```text
+legacy Agent Work
+  ├─ title/prompt        → Work title/intent
+  ├─ run_id/session_ref  → Run（若有）
+  └─ Markdown body       → agentwork Artifact
+```
+
+重复扫描不产生重复 Work、Run、Artifact 或事件；旧成果始终可打开。

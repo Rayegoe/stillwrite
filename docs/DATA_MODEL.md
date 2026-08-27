@@ -3,7 +3,7 @@
 ## 1. Source of Truth Matrix
 
 | Data | Source of Truth |
-|---|---|
+| --- | --- |
 | Workspace document body | Markdown/file |
 | Library source body | original file / materialized artifact |
 | Agent human-facing artifact | Markdown / explicit artifact |
@@ -13,7 +13,7 @@
 | Relations | SQLite durable |
 | Context | SQLite durable |
 | Web search history / result snapshots | SQLite durable |
-| Threads / turns | SQLite durable |
+| Threads / turns（未来 milestone） | SQLite durable |
 | Work | SQLite durable |
 | Memory | SQLite durable |
 | Source registrations | SQLite durable |
@@ -134,9 +134,20 @@ Current citation basket is migrated here.
 
 ### web_searches / web_search_results
 
-每次 Brave 互联网搜索都是一条可重读的 `web_searches` 历史记录；返回的标题、URL、摘要和时间信息以快照写入 `web_search_results`，不依赖再次请求互联网。网页结果可通过通用 `relations` 以 `search-result://<id>` 作为 target 关联到当前笔记。
+每次 Brave 互联网搜索都是一条可重读的 `web_searches` 历史记录；返回的标题、URL、摘要和时间信息以快照写入 `web_search_results`，不依赖再次请求互联网。它在 Document Context 中投影为 `搜索`，与 `批注`、`关联` 并列。网页结果可通过通用 `relations` 以 `search-result://<id>` 作为 target 关联到当前笔记。
 
-### agent_threads
+### Future Candidate：Thread / Turn / Run
+
+以下 `agent_threads` / `agent_turns` / `agent_runs` 字段设计是**未来草图**，不是当前 durable schema：
+
+- **不属于当前 durable schema**：M1 的 durable schema 只有 `works`（bridge schema），state.db 不创建这三张表；
+- **不属于 M1**：它们不出现在 M1 的 migration 边界里；
+- **不得因 DATA_MODEL 中存在草图而提前实现**：草图不构成实现任务，不进入任何未到期 milestone；
+- 只有真实的多轮 Work 使用证明需要后，才进入未来 milestone（候选：ROADMAP P6 Thread Continuity）。
+
+字段设计本轮不调整，仅作未来方向参考。
+
+#### agent_threads（Future Candidate: Thread）
 
 ```text
 id
@@ -148,7 +159,7 @@ created_at
 updated_at
 ```
 
-### agent_turns
+#### agent_turns（Future Candidate: Turn）
 
 ```text
 id
@@ -161,7 +172,7 @@ created_at
 
 UI history should prioritize latest human instruction, not origin quote.
 
-### agent_runs
+#### agent_runs（Future Candidate: Run）
 
 ```text
 id
@@ -178,19 +189,37 @@ error
 
 Raw Pi receipts can remain evidence; DB stores product projection.
 
+Run status 只描述一次执行：
+
+```text
+queued | running | succeeded | failed | cancelled
+```
+
+不要把 `needs_human` 或 `blocked` 写入 Run；它们属于 Work 协调状态。
+
+这三张表见上方 **Future Candidate：Thread / Turn / Run**（当前阶段不落地）。Pi receipt/session 属于 runtime evidence，DB 只保存 `receipt_ref` 引用，receipt 本体由 Pi runtime 留存；Pi 返回最终文本不等于 Work `completed`。
+
 ### works
 
 ```text
 id
 workspace_id
-kind
+title
 intent
 status
-owner
 summary
+next_action
 created_at
 updated_at
 ```
+
+`kind`、`owner` 只有在查询确实需要时再作为可选元数据加入；它们不能替代人类可读的 `title/intent`。Work status 只描述目标协调结果：
+
+```text
+queued | running | needs_human | blocked | completed | failed | cancelled
+```
+
+Run `succeeded` 不自动等于 Work `completed`。只有验收条件满足时，Work 才能完成；可恢复的 Run failure 通常使 Work `blocked`，不可恢复 failure 才使 Work `failed`。
 
 ### work_relations
 
@@ -238,6 +267,43 @@ updated_at
 ```
 
 Existing library_sources / feed state may migrate incrementally rather than through a big-bang rewrite.
+
+## 2.1 URI 与 legacy Agent Work bridge
+
+| 对象 | canonical URI | legacy / 兼容规则 |
+| --- | --- | --- |
+| Workspace Markdown | `workspace://<relative-path>` | 不转换正文 |
+| legacy Agent Work URI | `agent://<workspace-key>/<id>` | 匹配 sidecar 时映射到 `agentwork://...` |
+| `agent://`（其余形式） | 待定义 | 暂时 legacy/reserved，本阶段不重定义为 Agent Actor |
+| Agent Work Markdown Artifact | `agentwork://<workspace-key>/<id>` | 匹配 sidecar 的 `agent://<workspace-key>/<id>` 映射到这里 |
+| Work | `work://<work-id>` | 新模型对象 |
+| Run | `run://<run-id>` | 新模型对象 |
+| Brave result snapshot | `search-result://<result-id>` | 结果快照可重读 |
+| Existing pinned scope | `ws://<workspace-key>` | 只表示固定关联 scope，不是 Work |
+
+兼容 resolver 必须先按 Workspace + legacy Agent Work sidecar 校验双段 `agent://`，再决定是否把它解释为 Agent Work；不能全局替换前缀，本阶段不把 `agent://` 重定义为 Agent Actor。canonical URI 用于新 Relation/Event/Projection，原始 legacy URI 作为 provenance 保留。
+
+### Legacy bridge mapping
+
+旧 Agent Work 的 Markdown 正文是 Artifact，sidecar 是迁移输入，不是新的事实源：
+
+```text
+legacy Agent Work sidecar + Markdown
+  ├─ title / prompt       → Work title / intent
+  ├─ run_id / session_ref → existing Run；缺失时可建 legacy completed Run
+  ├─ Markdown body        → agentwork://... Artifact
+  └─ origin_uri / quote   → provenance / Context reference
+```
+
+新请求的顺序是 `create Work → create Run → persist Artifact → attach relations`。至少建立：
+
+```text
+run://<run>  belongs_to  work://<work>
+work://<work> produces    agentwork://<artifact>
+run://<run>  produces     agentwork://<artifact>
+```
+
+桥接以 `(workspace_id, legacy_agent_work_id)` 为幂等键；重复扫描不得复制对象或 semantic events。不得删除、覆盖旧 Markdown/JSON；只有 canonical projection 验证成功后才可隐藏旧入口。
 
 ## 3. Derived Tables
 

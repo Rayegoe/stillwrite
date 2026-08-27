@@ -26,11 +26,25 @@ StillWrite 要做的是：
 
 ## 产品表面保持简单
 
-当前最稳定的交互模型继续保留：
+架构原则：
+
+> **Domain-first · Agent-operated · Human-centered · Projection-driven**
+
+Work 是可选协调对象，不是所有知识和认知行为的父对象：阅读 → 批注 → 关联的路径不需要 Work。
+
+当前实现的兼容入口仍为：
 
 ```text
 文件 | 资料 | Agent
 ```
+
+Work-first 目标入口为：
+
+```text
+工作 | 资料 | 文件
+```
+
+目标模型中 `Agent` 是 Work 的 Actor，不是一级内容平面；旧 Agent 入口在迁移完成前继续作为兼容路径。
 
 - **文件**：人的工作区，可编辑 Markdown。
 - **资料**：外部知识池，只读为主，可浏览、引用、批注。
@@ -54,6 +68,14 @@ StillWrite 要做的是：
 ```
 
 `问 Agent` 是上下文动作，因此不需要再在右上工具栏保留一个重复入口。
+
+文档右侧 Context 的稳定投影为：
+
+```text
+批注 | 关联 | 搜索
+```
+
+其中“搜索”读取 Brave 的历史与结果快照；搜索结果不进入 Agent 聊天，也不增加一级导航。
 
 左下角齿轮“设置”用于填写 Brave Search API Key；每次互联网搜索都会成为右侧支持栏“搜索”视图中的历史条目，与“批注”“关联”并列。点开历史条目即可展开已写入 `state.db` 的结果快照，结果可重新打开网页或关联当前笔记。密钥由后端保存到应用数据目录，未保存设置时也可使用 `BRAVE_SEARCH_API_KEY` 环境变量。
 
@@ -217,6 +239,17 @@ External World / Human Activity / Agent Runs
 - sources
 
 FTS 等索引属于可重建派生数据；上述 durable state 不是“随时可删的索引”。
+
+### Work / Run / Artifact compatibility
+
+Work 重构前固定四条兼容规则：
+
+- `agent://` 暂时整体保持 legacy/reserved，本阶段不重定义为 Agent Actor（Agent Actor 的 canonical URI 待定义）；匹配旧 Agent Work sidecar 的双段 `agent://<workspace-key>/<id>` 通过 resolver 映射到 `agentwork://<workspace-key>/<id>`，保留原始 URI；
+- Run 是单次执行，Work 是协调结果，二者状态不共用；Run `succeeded` 不自动使 Work `completed`，Pi 返回最终文本也不等于 Work `completed`；
+- 旧 Agent Work Markdown 不迁移正文、不删除 sidecar，按 `(workspace_id, legacy_agent_work_id)` 幂等桥接为 Work、Run（若有运行信息）和 Markdown Artifact；
+- `work://`、`run://`、`agentwork://` 是 canonical 对象 URI，`ws://` 只保留为既有固定关联 scope。
+
+本阶段同时冻结：Work 是可选协调对象（不是根领域对象）；Pi receipt/session 属于 runtime evidence，durable state 只保存 `receipt_ref` 引用；暂不要求 durable Thread/Run（M1 只落地 `works`，Thread 关联属后续阶段）。
 
 ### Pi
 

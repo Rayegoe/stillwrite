@@ -95,7 +95,7 @@ Adapter 只负责：
 workspace://docs/design.md
 library://source-id/path.md
 source://rss-simon
-agent://agent-id
+agent://...                     (legacy/reserved，Agent Actor canonical URI 待定义)
 thread://thread-id
 work://work-id
 run://run-id

@@ -13,6 +13,32 @@
 
 ---
 
+## Workbench compatibility gate（A0，文档契约）
+
+在 Work 重构前，以下四个兼容接缝必须先固定；本阶段不修改 Rust/JS/CSS 产品代码：
+
+- [x] URI legacy/canonical resolver：`agent://` 暂时保持 legacy/reserved（本阶段不重定义为 Agent Actor），匹配旧 Agent Work sidecar 的双段 URI 映射到 `agentwork://` Artifact；保留原始 URI；`ws://` 仅为既有固定关联 scope；
+- [x] Document Context 明确为 `批注 | 关联 | 搜索`，搜索历史/结果快照继续来自 `state.db`；
+- [x] 明确 Run status 与 Work status 分离，Run `succeeded` 不自动等于 Work `completed`；
+- [x] 定义 legacy Agent Work → Work/Run/Artifact 的幂等 bridge，不重写或删除 Markdown/sidecar。
+
+本阶段（PREP/A0/A1）同时冻结：Work 是可选协调对象（不是根领域对象）；Pi receipt/session 是 runtime evidence（durable state 只保存 `receipt_ref` 引用）；Pi 返回最终文本不等于 Work `completed`（`completed` 只来自人的明确接受）；暂不要求 durable Thread/Run。
+
+### Reframed execution order
+
+```text
+A0 compatibility contract
+→ A1 minimal Work primitive
+→ A2 Pi → Work bridge
+→ A3 Work-first Shell
+→ A4 Work Detail + Context/Evidence
+→ A5 Needs Human
+```
+
+原 P9 的 Work/WO 协调目标已前移到 A1–A5；P9 只保留后续多 Agent、WO protocol 和证据压缩的扩展工作。
+
+---
+
 ## P0 — Foundation Contract
 
 ### Goal
@@ -70,6 +96,10 @@
 - no React rewrite
 - no plugin system
 
+### Work slice boundary
+
+`works`、Work semantic events 和 Work projection 属于 A1，不得在 A0 直接改 UI。A2 才把 Pi Run 与 Work/Artifact 连接起来；A3 之后才改变默认导航和启动面。
+
 ---
 
 ## P2 — Eventize Existing Human Actions
@@ -107,7 +137,7 @@
 - [x] related pinned items → relations（P2a 已完成：`ws://<workspace-key>` scope + 幂等 legacy 导入）
 - [x] web search history/results → SQLite（P2c：Brave 快照、历史展开、网页结果关联当前笔记）
 - [ ] citation basket → context sets
-- [ ] Agent Work metadata → thread/turn/work
+- [ ] Agent Work metadata → thread/turn/work（A2 先做兼容 bridge，完整 Thread/Turn 迁移留在 P6）
 - [ ] Agent history → turns
 - [ ] feed durable state → source model where appropriate
 
@@ -250,7 +280,7 @@ No RSS-specific top-level UI.
 
 ### Goal
 
-降低监督多 Agent 的人类带宽。
+降低监督多 Agent 的人类带宽。Work 的最小 primitive、Pi bridge 和 Work-first Shell 已前移到 A1–A5；本阶段只做跨 Agent/WO 的协调扩展。
 
 ### Work projection
 
@@ -322,17 +352,17 @@ merge / push / release / replace active version 保留明确人类边界。
 
 # Immediate Next Work
 
-文档落地后，第一张真正的工程 Work 应只做：
+兼容契约落地后，第一张真正的工程 Work 应只做：
 
-> **P1: SQLite Core Durable State Foundation**
+> **A1: SQLite-backed Minimal Work Primitive**
 
 验收：
 
-1. schema version + migrations；
-2. `events / anchors / relations / context` 最小表先落地；
-3. durable/derived 数据分层；
-4. command transaction helper；
-5. tests；
-6. 不改变现有选区问 Agent / 批注 / Library 使用方式。
+1. 在现有 migration runner 上增加 `works`；
+2. 增加 `work://` 与 Work semantic events；
+3. 保持 Relational State + Append-only Events；
+4. 增加 fresh/restart/update/rollback/event atomicity tests；
+5. 不修改 Workbench UI，不改变现有选区问 Agent / 批注 / 搜索 / Library 使用方式；
+6. A1 完成后再进入 A2，不在同一阶段顺手做 Shell 改造。
 
-完成后再进入 P2，而不是顺手开发 Daily Brief、英语、RSS 推荐或 Self-Evolution。
+完成 A 系列、证明 Work/Run/Artifact 能在一个窗口中被监督后，再进入 Thread、Memory、Library 推荐、RSS 智能或 Self-Evolution。

@@ -15,6 +15,8 @@ StillWrite 是一个 local-first、agent-native 的 Human Workbench：
 
 `Software is Agent` 不意味着为每个能力增加聊天框、按钮、页面或插件。
 
+架构原则：**Domain-first · Agent-operated · Human-centered · Projection-driven**。
+
 ## 2. Non-Negotiable Rules
 
 ### 2.1 UI MUST NOT own durable product state
@@ -116,6 +118,7 @@ Adapter
 任何新需求在设计 UI 前，先映射到：
 
 ### Entity
+
 具有身份的对象。
 
 例：
@@ -131,12 +134,15 @@ Adapter
 - audio
 
 ### Event
+
 有语义的动作或状态转换。
 
 ### Relation
+
 对象之间的 typed edge。
 
 ### Artifact
+
 可持久结果：
 
 - Markdown
@@ -147,27 +153,58 @@ Adapter
 - dataset
 
 ### Anchor
+
 对正文选区/范围的稳定引用。
 
 ### Annotation
+
 附着在 Anchor / Document 上的批注。
 
 ### Context
+
 当前人或 Agent 明确使用的工作集。
 
 ### Memory
+
 由证据压缩出来、未来仍有价值的长期知识。
 
 ### Work
+
 目标、状态、Agent、Artifact、Evidence、Decision、Risk、Next Action 的协调对象。
 
 ### Thread
+
 持续的人-Agent 意图与历史。
 
 ### Agent
+
 通过 bounded capabilities 进行 reasoning/execution 的 actor。
 
 **如果已有 primitive 能表达需求，禁止再增加新的 durable state system 或顶层 UI module。**
+
+### 3.1 URI legacy / canonical compatibility
+
+新代码统一输出 canonical URI；旧 URI 只通过 resolver 兼容，不在迁移时重写 Markdown、历史事件或既有 sidecar。
+
+```text
+workspace://<relative-path>                 Workspace Markdown 文档
+agent://...                                 暂时 legacy/reserved，本阶段不重定义为 Agent Actor
+agentwork://<workspace-key>/<id>             Agent Work Markdown Artifact
+work://<work-id>                             Work
+run://<run-id>                               一次执行
+search-result://<result-id>                  Brave 搜索结果快照
+ws://<workspace-key>                         既有固定关联的工作区 scope
+```
+
+当前旧版 Agent Work 可能产生：
+
+```text
+agent://<workspace-key>/<agent-work-id>
+```
+
+只有当该 URI 能在对应 Workspace 的 legacy Agent Work sidecar 中解析到时，才将它解释为 Agent Work，并暴露 canonical `agentwork://...`；不能把所有 `agent://` URI 都改解释为文档。本阶段 `agent://` 整体保持 legacy/reserved，不重定义为 Agent Actor；Agent Actor 的 canonical URI 待未来需要时再定义。
+
+兼容 resolver 应同时保留 `legacy_uri` / provenance，并让新建的 Relation、Event、Work、Run 和 Projection 使用 canonical URI。`ws://...` 仅是固定关联的 scope 对象，不得复用为 Work 或 Workspace 文档 URI。`workspace_id` 使用现有不透明 workspace key，不把绝对文件系统路径写入 durable state。
 
 ## 4. Event Model
 
@@ -222,8 +259,14 @@ frontend state
 - `agent.run.completed`
 - `agent.work.created`
 - `agent.work.edited`
+- `work.created`
+- `work.started`
+- `work.updated`
+- `work.needs_human`
 - `work.blocked`
 - `work.completed`
+- `work.failed`
+- `work.cancelled`
 - `decision.made`
 - `code.change.requested`
 - `code.change.committed`
@@ -258,6 +301,8 @@ Memory 是：
 
 ## 6. Work Is a Primitive
 
+Work 是**可选**协调对象，不是根领域对象：`Document → Anchor → Annotation → Relation` 路径完全不需要 Work；只有需要 Agent 执行、协调与监督时才建立 `Human intent → Work → Agent → Artifact → Human judgment`。
+
 WO 不是一个必须独立做 UI 的模块。
 
 可将其抽象为：
@@ -275,6 +320,42 @@ Work
 ```
 
 Coding Task、Research、Writing、Daily Brief、Learning Session、Bug Investigation 都可以是 Work 的不同 projection。
+
+### 6.1 Work status 与 Run status 分离
+
+Work 是协调对象，第一版状态固定为：
+
+```text
+queued | running | needs_human | blocked | completed | failed | cancelled
+```
+
+Run 是一次具体执行，第一版状态固定为：
+
+```text
+queued | running | succeeded | failed | cancelled
+```
+
+Run 没有 `needs_human` 状态；`needs_human`、`blocked` 表达 Work 层面的人的判断、输入缺失或重试协调。Run `succeeded` 也不自动等于 Work `completed`：Work 仍可能等待质量判断、补充输入或下一次 Run。Pi 返回最终文本（final output）同样不等于 Work `completed`，`completed` 只来自人的明确接受（验收条件满足）。Run `failed` 由协调策略映射为 Work `blocked`（可恢复/可重试）或 `failed`（不可恢复），而不是机械复制状态字符串。
+
+Pi receipt/session 属于 runtime evidence：durable state 只保存 `receipt_ref` 引用，receipt 本体由 Pi runtime 留存。
+
+### 6.2 Legacy Agent Work bridge
+
+Agent Work Markdown 是可读写 Artifact，不是新的 Work 状态数据库。兼容 bridge 的语义为：
+
+```text
+legacy Agent Work sidecar + Markdown
+        ↓
+Work（intent / coordination status）
+        ├─ Run（pi session / run receipt，若存在）
+        └─ agentwork://...（Markdown Artifact）
+```
+
+- 新的 Pi 请求先创建/绑定 Work，再创建 Run；最终 Markdown 作为 Artifact 关联到 Work 和对应 Run。
+- 旧 Agent Work 的 `title/prompt` 映射为 Work 的 title/intent，正文保留为 Artifact；`origin_uri/origin_quote` 保留为 provenance/context，不替代人类意图。
+- 有 `run_id` / `pi_session_ref` 时关联现有 Run；没有运行信息时可以建立标记为 `legacy`、已结束的合成 Run，但不得伪造 running 状态。
+- 以 `(workspace_id, legacy_agent_work_id)` 为幂等键；重复启动或重复扫描不得创建重复 Work、Run、Artifact 或语义事件。
+- bridge 不删除、不改写旧 Markdown/JSON sidecar；历史 URI 通过兼容 resolver 映射，验证成功后才可在 projection 中显示 canonical URI。
 
 ## 7. Agent Capability Boundary
 
@@ -365,6 +446,7 @@ UI 是 projection layer。
 
 - annotations
 - relations
+- document web-search history / result snapshots
 - evidence
 - contextual projections
 

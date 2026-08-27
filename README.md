@@ -1,6 +1,22 @@
 # Stillwrite
 
-一个极简、本地优先、**运行时零端口**的 Markdown 沉浸式写作工具。
+一个本地优先、**运行时零端口**的 Agent-native Human Workbench；Markdown 是其中可携带、可编辑的一类 Artifact Surface。
+
+## 当前兼容表面
+
+当前产品仍保留 editor-first 的兼容入口：
+
+```text
+文件 | 资料 | Agent
+```
+
+目标 Workbench 表面为：
+
+```text
+工作 | 资料 | 文件
+```
+
+`Agent` 在目标模型中是 Work 的 Actor，不是永久一级内容平面。Work-first Shell 迁移前，旧 Agent 入口继续可用。
 
 ## 第一版只做这些
 
@@ -152,7 +168,18 @@ RSS 只是一个 **Library 输入适配器**，不是第四个顶层平面，也
 - [`docs/ROADMAP.md`](./docs/ROADMAP.md)：从 P0 契约到 P11 的分阶段迁移路线。
 - [`docs/VNEXT_FEASIBILITY.md`](./docs/VNEXT_FEASIBILITY.md)：基于当前代码的可行性分析与实施建议。
 
-当前仓库处于 Foundation / Contract 的落地阶段：本次纳入文档不改变现有产品行为；工程迁移应从 P1 的 SQLite durable state 最小闭环开始，并遵守“迁移先于删除、保留 Markdown 可携带内容、不要大爆炸重写”的约束。
+当前仓库已落地 P1 durable state、固定关联和 Brave 搜索持久化；Workbench 迁移从 A0 兼容契约开始，再进入 A1 的 SQLite Work primitive。文档契约阶段不改变现有产品行为，并继续遵守“迁移先于删除、保留 Markdown 可携带内容、不要大爆炸重写”的约束。
+
+### Workbench compatibility seams
+
+Work 重构前必须遵守四个兼容接缝：
+
+1. **URI**：`agent://` 暂时保持 legacy/reserved，本阶段不重定义为 Agent Actor；匹配旧 Agent Work sidecar 的 `agent://<workspace-key>/<id>` 映射为 canonical `agentwork://<workspace-key>/<id>`。旧字符串保留，不改写历史内容；`work://`、`run://`、`search-result://` 是新对象 URI，`ws://` 只表示既有固定关联 scope。
+2. **Document Context**：文档右侧 Context 固定包含 `批注 | 关联 | 搜索`。Brave 搜索历史和网页结果快照来自 `state.db`，搜索不是 Agent 聊天或新的一级导航。
+3. **Status**：Run 只描述一次执行（`queued/running/succeeded/failed/cancelled`）；Work 描述协调结果（`queued/running/needs_human/blocked/completed/failed/cancelled`）。Run 成功不自动代表 Work 完成；Pi 返回最终文本也不等于 Work 完成，`completed` 只来自人的明确接受。
+4. **Legacy Agent Work bridge**：旧 Markdown + sidecar 保持可打开；新模型按 `Work → Run → agentwork Artifact` 建立幂等映射，不能删除、覆盖或重复导入旧成果。
+
+这些规则只更新契约和迁移边界，不提前改变产品代码行为。
 
 ## 为什么不是单 HTML `file://`
 
