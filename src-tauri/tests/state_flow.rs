@@ -1,0 +1,186 @@
+//! P1 durable state 端到端契约：从公开 API 验证
+//! 「migration → 复合命令原子性 → 事件留存 → durable 数据跨重启」。
+//!
+//! `selected_quote_to_relation` 是未来 vertical slice 的命令模板：
+//! 一个用户动作涉及的 anchors / relations / events 必须在同一事务中生效，
+//! 任何一步失败都不能留下半截状态。
+
+use std::path::PathBuf;
+use stillwrite_lib::state_store::{
+    attach_context_item, create_anchor_in_tx, create_context_set, create_relation,
+    create_relation_in_tx, event_action, list_context_items, list_events, neighbors, open_state_db,
+    tx_command, AnchorRecord, NeighborHit, NewAnchor, NewContextSet, NewRelation, ObjectUri,
+    RelationDirection,
+};
+
+fn tmp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("sw-e2e-state-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// 未来「选区 → ＋关联」的命令雏形（P2 迁移时只需挪进 backend command）。
+/// anchor + relation + 语义事件在一个事务中同时落地。
+fn selected_quote_to_relation(
+    conn: &mut rusqlite::Connection,
+    document_uri: ObjectUri,
+    quote: &str,
+    target_uri: ObjectUri,
+) -> Result<(AnchorRecord, i64), String> {
+    tx_command(conn, move |tx| {
+        let anchor = create_anchor_in_tx(
+            tx,
+            NewAnchor {
+                document_uri: document_uri.clone(),
+                kind: "字句".into(),
+                start_offset: 0,
+                end_offset: quote.chars().count() as i64,
+                quote: quote.to_string(),
+                prefix: None,
+                suffix: None,
+            },
+        )?;
+        let relation = create_relation_in_tx(
+            tx,
+            NewRelation {
+                source_uri: document_uri.clone(),
+                predicate: "related_to".into(),
+                target_uri: target_uri.clone(),
+                anchor_id: Some(anchor.id),
+                created_by: None,
+                confidence: None,
+                workspace_id: None,
+            },
+        )?;
+        Ok((anchor, relation.id))
+    })
+}
+
+#[test]
+fn composite_command_commits_state_and_event_together() {
+    let mut conn = open_state_db(&tmp_dir("composite").join("state.db")).unwrap();
+
+    let document = ObjectUri::workspace("草稿/第一章.md").unwrap();
+    let library_doc = ObjectUri::library("arxiv-src", "papers/agent-memory.md").unwrap();
+    let (_anchor, relation_id) = selected_quote_to_relation(
+        &mut conn,
+        document.clone(),
+        "把资料关联到我的正文",
+        library_doc.clone(),
+    )
+    .unwrap();
+    // 把返回的 relation 变成可导航 URI：relation://<id>
+    assert!(ObjectUri::relation(relation_id)
+        .as_str()
+        .starts_with("relation://"));
+
+    // 状态与事件同时可见
+    let hits: Vec<NeighborHit> = neighbors(&conn, document.as_str(), None, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].direction, RelationDirection::Outgoing);
+    assert_eq!(hits[0].neighbor_uri, library_doc.as_str());
+    assert_eq!(hits[0].relation.anchor_id, Some(_anchor.id));
+
+    let last = list_events(&conn, 1).unwrap().remove(0);
+    assert_eq!(last.action, event_action::RELATION_CREATED);
+    assert_eq!(
+        last.payload.as_ref().unwrap()["source_uri"].as_str(),
+        Some(document.as_str())
+    );
+}
+
+#[test]
+fn failed_composite_command_rolls_back_every_primitive() {
+    let mut conn = open_state_db(&tmp_dir("rollback").join("state.db")).unwrap();
+
+    let document = ObjectUri::workspace("笔记.md").unwrap();
+    let existing_target = ObjectUri::workspace("已有.md").unwrap();
+    create_relation(
+        &mut conn,
+        NewRelation {
+            source_uri: document.clone(),
+            predicate: "related_to".into(),
+            target_uri: existing_target.clone(),
+            anchor_id: None,
+            created_by: None,
+            confidence: None,
+            workspace_id: None,
+        },
+    )
+    .unwrap();
+    let events_before = list_events(&conn, 50).unwrap().len();
+
+    // 复合命令中途撞上唯一约束：此前写入的 anchor 和事件都必须一起回滚
+    let outcome = tx_command(&mut conn, |tx| {
+        create_anchor_in_tx(
+            tx,
+            NewAnchor {
+                document_uri: document.clone(),
+                kind: "字句".into(),
+                start_offset: 0,
+                end_offset: 5,
+                quote: "注定要回滚的选区".into(),
+                prefix: None,
+                suffix: None,
+            },
+        )?;
+        create_relation_in_tx(
+            tx,
+            NewRelation {
+                source_uri: document.clone(),
+                predicate: "related_to".into(),
+                target_uri: existing_target.clone(), // 与开头已存在的三元组重复 → 必败
+                anchor_id: None,
+                created_by: None,
+                confidence: None,
+                workspace_id: None,
+            },
+        )?;
+        Ok(())
+    });
+    assert!(
+        outcome.unwrap_err().contains("相同的关联已存在"),
+        "应报唯一约束错误"
+    );
+
+    let anchors_left: i64 = conn
+        .query_row("SELECT COUNT(*) FROM anchors", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(anchors_left, 0, "回滚后不允许有 anchor 残留");
+    assert_eq!(
+        neighbors(&conn, document.as_str(), None, 10).unwrap().len(),
+        1
+    );
+    assert_eq!(list_events(&conn, 50).unwrap().len(), events_before);
+}
+
+#[test]
+fn context_and_relation_survive_reopen_like_durable_facts() {
+    let dir = tmp_dir("durable");
+    let db_path = dir.join("state.db");
+    let mut conn = open_state_db(&db_path).unwrap();
+
+    let set = create_context_set(
+        &mut conn,
+        NewContextSet {
+            purpose: Some("本会话引用篮（P1 仅数据能力）".into()),
+            ..NewContextSet::default()
+        },
+    )
+    .unwrap();
+    attach_context_item(
+        &mut conn,
+        set.id,
+        ObjectUri::library("rss", "daily/brief.md").unwrap(),
+        None,
+        None,
+    )
+    .unwrap();
+
+    // 重开数据库：派生索引可以随时重建，durable 数据必须原样还在
+    drop(conn);
+    let conn = open_state_db(&db_path).unwrap();
+    assert_eq!(list_events(&conn, 10).unwrap().len(), 1);
+    assert_eq!(list_context_items(&conn, set.id).unwrap().len(), 1);
+}

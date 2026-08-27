@@ -95,7 +95,7 @@ Library 的目标边界是：`Library ≠ Workspace`、`Index ≠ Content`。引
 Agent 不是右侧常驻聊天框，而是由文档选区触发、最终落成 Markdown 的工作文档：
 
 - 侧栏现在有 `文件 / 资料 / Agent` 三个平面；`Agent` 列表只显示工作标题、来源选区和运行状态，不把 Workspace 文件树或 Library 展开成第二棵目录树。
-- 在阅读区选中文字后，浮层会同时提供 `＋批注` 与 `问 Agent`。工具栏里的 `问 Agent` 也可围绕当前段落发起请求；`Agent` 侧栏的 `＋` 用于新建独立工作。
+- 在阅读区选中文字后，浮层会同时提供 `＋批注`、`问 Agent` 和 `搜索`。工具栏里的 `问 Agent` 也可围绕当前段落发起请求；`Agent` 侧栏的 `＋` 用于新建独立工作。
 - Agent 结果保存为当前 Workspace 对应的独立 Markdown 工作文档，正文在 StillWrite 应用数据目录，不进入 Workspace 文件树、git 或 Library。打开后与其他文档共用同一个编辑器、阅读区、选区、高亮和批注系统。
 - Agent 工作的来源选区、请求和 Pi session 相对引用只保存在最小 JSON 侧车；正文仍是 Markdown。工作运行时列表显示状态，完成后用户点击列表项再打开结果，不打断当前写作。
 - StillWrite 通过本机 Pi 的 `--mode rpc` 持久进程运行 Agent；一个 Workspace 对应一个 Pi 进程和独立 session 目录。流式预览只留在 Agent 列表，只有收到权威最终文本后才保存一次 Agent Work。
@@ -121,7 +121,7 @@ provider、模型和认证在 Pi 外部配置，StillWrite 不保存凭据。必
 - 在可编辑的 Workspace Markdown 文档中写下标题或开头后，StillWrite 会从 H1、文件名和（标题信号不足时的）首段提取 3–6 个关键词/短语，分别检索 Workspace / Library，并按多关键词共现、短语命中和标题命中重排，最多展示 5 条材料。
 - 关联使用独立的 trigram 侧车索引；普通手工搜索仍保留原有 unicode61 语义，二字中文关键词另有正文 LIKE 兜底。
 - 结果出现在右侧支持栏的 `关联` 视图，分类为 `过去的批注`、`工作区` 和 `资料`；普通后台刷新不自动打开面板、不抢焦点、不改写正文，点击结果后才打开原始材料。
-- 在写作区或阅读区选中字句/段落后，浮层提供 `批注`、`问 Agent` 和 `＋关联`；`＋关联` 会把选区作为当前作品的临时检索补充，最多保留最近 3 个选区，并立即展示更新后的关联材料。
+- 在写作区或阅读区选中字句/段落后，浮层提供 `批注`、`问 Agent`、`搜索` 和 `＋关联`；`搜索` 会把选区填入当前搜索框并立即检索，`＋关联` 会把选区作为当前作品的临时检索补充，最多保留最近 3 个选区。
 - 每张关联卡片都可以在 `引用` 旁点击 `☆ 固定`；固定卡片会保存到本机、优先显示，并且不受关联结果 Top 5 限制。固定状态按 Workspace 保存，不写入 Markdown 或 git。
 - 关联只使用本地搜索和现有 Markdown / 索引，不调用模型、不访问网络、不自动写入文档；除用户主动固定的卡片状态外，不产生持久化关系数据。
 - Library 结果可以由用户显式加入当前 `引用`；关联本身不会自动加入引用篮。查看 Library 或 Agent Work 时，关联结果会清空。
@@ -137,6 +137,21 @@ RSS 只是一个 **Library 输入适配器**，不是第四个顶层平面，也
 - `rss-sources.json` 只保存用户订阅（id / name / url）；ETag、上次抓取时间、错误等派生状态在 `rss-fetch-state.json`，删除后只导致下一次完整抓取，不丢订阅。删除源会删除本地 Markdown 缓存并刷新索引，但**保留**已有批注。
 - 手动刷新是主路径；打开 `资料` 面板时若距上次全局刷新超过 30 分钟，会在后台静默触发一次。
 - **不做**：网页全文抓取 / headless browser、EPUB / Kindle 导出、已读未读、定时 daemon、RSS 专属数据库、RSS 专属批注或 Agent 管线。summary-only feed 的影响留待真实使用数据再决定是否引入正文提取。
+
+## vNext Foundation：统一维护基线
+
+`stillwrite-vnext-foundation` 已纳入本仓库，作为后续 Agent 迭代的产品与工程契约。它描述目标架构，不等同于当前所有能力都已实现：
+
+- [`AGENTS.md`](./AGENTS.md)：Coding Agent、Pi、Codex 的仓库级开发契约。
+- [`docs/README.md`](./docs/README.md)：Agent-native Human Workbench 的设计总览。
+- [`docs/PRINCIPLES.md`](./docs/PRINCIPLES.md)：产品与工程原则。
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)：统一架构与自演化边界。
+- [`docs/DATA_MODEL.md`](./docs/DATA_MODEL.md)：Source of Truth 与 durable state 模型。
+- [`docs/UX_MODEL.md`](./docs/UX_MODEL.md)：UI / Projection 模型。
+- [`docs/ROADMAP.md`](./docs/ROADMAP.md)：从 P0 契约到 P11 的分阶段迁移路线。
+- [`docs/VNEXT_FEASIBILITY.md`](./docs/VNEXT_FEASIBILITY.md)：基于当前代码的可行性分析与实施建议。
+
+当前仓库处于 Foundation / Contract 的落地阶段：本次纳入文档不改变现有产品行为；工程迁移应从 P1 的 SQLite durable state 最小闭环开始，并遵守“迁移先于删除、保留 Markdown 可携带内容、不要大爆炸重写”的约束。
 
 ## 为什么不是单 HTML `file://`
 
@@ -247,6 +262,7 @@ stillwrite/
     ├── src/library.rs   # 外部 Markdown 资料源、增量索引、SHA-256 去重、只读读取
     ├── src/feeds.rs    # RSS/Atom 源：抓取 + 解析 + 物化 Markdown + OPML 导入 + 单测
     ├── src/sync.rs     # git 同步引擎（最后写入者胜 + 单测 + 板子集成测试）
+    ├── src/state_store.rs # vNext P1 durable state（state.db）：migration runner + events/anchors/relations/context 原语与事务边界
     ├── resources/pi/  # StillWrite system prompt 与只读 Workspace 工具扩展
     ├── capabilities/   # 最小 IPC 权限
     └── tauri.conf.json # 直接把 ../ui 嵌入桌面应用
@@ -259,7 +275,7 @@ node ui/annotations.test.js # 结构化批注前端单元测试
 node ui/document-links.test.js # 项目内文档链接与 URL 单元测试
 node ui/agent-events.test.js # Agent 流式事件归约与结束状态测试
 cd src-tauri
-cargo test                # 默认单测与批注流程测试；另有 2 个按需调试/网络测试
+cargo test                # 默认单测、批注流程测试与 state.db durable 契约测试；另有 2 个按需调试/网络测试
 cargo test -- --ignored live   # 需要配置的远程设备在线：真实跨设备推送/拉取/冲突收敛
 ```
 

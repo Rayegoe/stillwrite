@@ -15,6 +15,7 @@ mod feeds;
 mod indexer;
 mod library;
 mod pi_agent;
+pub mod state_store;
 mod sync;
 
 #[derive(Default)]
