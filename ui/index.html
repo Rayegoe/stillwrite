@@ -185,6 +185,17 @@
           <div class="tree" id="tree">
             <div class="empty-tip">从“文件”菜单打开文件夹或 Markdown 文档</div>
           </div>
+          <div class="sidebar-foot">
+            <button
+              class="icon-btn subtle sidebar-settings-button"
+              id="settingsButton"
+              type="button"
+              title="设置"
+              aria-label="设置"
+            >
+              ⚙
+            </button>
+          </div>
         </aside>
         <div
           class="resize-handle sidebar-handle"
@@ -365,6 +376,37 @@
       </form>
     </dialog>
 
+    <dialog id="settingsDialog" class="modal settings-dialog">
+      <form method="dialog" id="settingsForm">
+        <h3>设置</h3>
+        <label for="braveApiKey">Brave Search API Key</label>
+        <input
+          id="braveApiKey"
+          type="password"
+          spellcheck="false"
+          autocomplete="new-password"
+          placeholder="输入 Brave API Key"
+        />
+        <p class="modal-help">
+          密钥保存在 Stillwrite 应用数据目录，仅由后端用于互联网搜索；已保存的密钥不会回显。
+        </p>
+        <div class="settings-key-status" id="braveApiKeyStatus">
+          尚未配置
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="text-btn" id="clearBraveApiKey">
+            清除
+          </button>
+          <button type="button" class="text-btn" id="cancelSettings">
+            取消
+          </button>
+          <button type="submit" class="primary-btn" id="saveSettings">
+            保存
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="agentAskDialog" class="modal agent-ask-dialog">
       <form method="dialog" id="agentAskForm">
         <h3 id="agentAskTitle">问 Agent</h3>
@@ -401,6 +443,14 @@
       </button>
       <button class="selection-agent" id="selectionAgent" type="button">
         问 Agent
+      </button>
+      <button
+        class="selection-search"
+        id="selectionSearch"
+        type="button"
+        title="调用 Brave Search API 搜索选中文本"
+      >
+        联网搜索
       </button>
       <button
         class="selection-related"

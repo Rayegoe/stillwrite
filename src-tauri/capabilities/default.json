@@ -3,5 +3,5 @@
   "identifier": "main-capability",
   "description": "Core IPC for Stillwrite's local window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "opener:allow-default-urls"]
 }

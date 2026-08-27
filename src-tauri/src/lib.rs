@@ -18,6 +18,8 @@ mod pi_agent;
 pub mod state_store;
 mod sync;
 
+use state_store::ObjectUri;
+
 #[derive(Default)]
 struct AppState {
     root: Mutex<Option<PathBuf>>,
@@ -47,6 +49,126 @@ struct OpenDocumentData {
     path: String,
     name: String,
     content: String,
+}
+
+#[derive(Serialize)]
+struct WebSearchHit {
+    title: String,
+    url: String,
+    description: String,
+    age: Option<String>,
+}
+
+const BRAVE_API_KEY_ENV_NAMES: [&str; 2] = ["BRAVE_SEARCH_API_KEY", "BRAVE_API_KEY"];
+
+fn environment_brave_api_key() -> Option<String> {
+    BRAVE_API_KEY_ENV_NAMES.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|e| format!("设置 Brave API Key 权限失败: {e}"))
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path, _mode: u32) -> Result<(), String> {
+    Ok(())
+}
+
+fn brave_api_key_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let secrets_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("无法定位 Stillwrite 应用数据目录: {e}"))?
+        .join("secrets");
+    fs::create_dir_all(&secrets_dir).map_err(|e| format!("创建 Stillwrite 密钥目录失败: {e}"))?;
+    set_private_permissions(&secrets_dir, 0o700)?;
+    Ok(secrets_dir.join("brave_search_api_key"))
+}
+
+fn stored_brave_api_key(app: &AppHandle) -> Result<Option<String>, String> {
+    let path = brave_api_key_path(app)?;
+    match fs::read_to_string(&path) {
+        Ok(value) => {
+            set_private_permissions(&path, 0o600)?;
+            let value = value.trim().to_owned();
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                validate_brave_api_key(&value).map(Some)
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("读取 Brave API Key 失败: {error}")),
+    }
+}
+
+fn brave_api_key(app: &AppHandle) -> Result<String, String> {
+    if let Some(key) = stored_brave_api_key(app)? {
+        return Ok(key);
+    }
+    environment_brave_api_key().ok_or_else(|| {
+        "未配置 Brave Search API Key，请点击左下角设置，或设置 BRAVE_SEARCH_API_KEY 环境变量"
+            .to_owned()
+    })
+}
+
+fn validate_brave_api_key(key: &str) -> Result<String, String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("Brave API Key 不能为空".to_owned());
+    }
+    if key.len() > 512 || key.chars().any(char::is_control) {
+        return Err("Brave API Key 格式无效".to_owned());
+    }
+    Ok(key.to_owned())
+}
+
+#[tauri::command]
+fn brave_api_key_status(app: AppHandle) -> Result<String, String> {
+    if stored_brave_api_key(&app)?.is_some() {
+        return Ok("settings".to_owned());
+    }
+    if environment_brave_api_key().is_some() {
+        return Ok("env".to_owned());
+    }
+    Ok("missing".to_owned())
+}
+
+#[tauri::command]
+fn save_brave_api_key(app: AppHandle, key: String) -> Result<(), String> {
+    let key = validate_brave_api_key(&key)?;
+    let path = brave_api_key_path(&app)?;
+    let temp_path =
+        path.with_file_name(format!(".brave_search_api_key.{}.tmp", std::process::id()));
+    fs::write(&temp_path, key.as_bytes()).map_err(|e| format!("保存 Brave API Key 失败: {e}"))?;
+    if let Err(error) = set_private_permissions(&temp_path, 0o600) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temp_path, &path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("保存 Brave API Key 失败: {error}"));
+    }
+    set_private_permissions(&path, 0o600)
+}
+
+#[tauri::command]
+fn clear_brave_api_key(app: AppHandle) -> Result<(), String> {
+    let path = brave_api_key_path(&app)?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("清除 Brave API Key 失败: {error}")),
+    }
 }
 
 #[derive(Deserialize)]
@@ -534,6 +656,94 @@ async fn search_index(
     })
 }
 
+fn parse_brave_web_results(body: &str) -> Result<Vec<WebSearchHit>, String> {
+    let payload: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("Brave 搜索响应不是有效 JSON: {e}"))?;
+    let Some(results) = payload
+        .get("web")
+        .and_then(|web| web.get("results"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+
+    Ok(results
+        .iter()
+        .filter_map(|item| {
+            let title = item.get("title")?.as_str()?.trim();
+            let url = item.get("url")?.as_str()?.trim();
+            if title.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
+                return None;
+            }
+            Some(WebSearchHit {
+                title: title.to_owned(),
+                url: url.to_owned(),
+                description: item
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                age: item
+                    .get("age")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            })
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn search_web(
+    app: AppHandle,
+    query: String,
+    count: Option<usize>,
+) -> Result<Vec<WebSearchHit>, String> {
+    let query = query.trim().to_owned();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let api_key = brave_api_key(&app)?;
+    let count = count.unwrap_or(10).clamp(1, 20);
+    let mut endpoint = url::Url::parse("https://api.search.brave.com/res/v1/web/search")
+        .map_err(|e| format!("Brave 搜索地址无效: {e}"))?;
+    let count_text = count.to_string();
+    endpoint
+        .query_pairs_mut()
+        .append_pair("q", &query)
+        .append_pair("count", &count_text)
+        .append_pair("result_filter", "web")
+        .append_pair("text_decorations", "false");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("创建 Brave 搜索客户端失败: {e}"))?;
+    let response = client
+        .get(endpoint)
+        .header("Accept", "application/json")
+        .header("X-Subscription-Token", api_key)
+        .send()
+        .await
+        .map_err(|e| format!("请求 Brave 搜索失败: {e}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("读取 Brave 搜索响应失败: {e}"))?;
+    if !status.is_success() {
+        let detail = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|payload| {
+                payload
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+        return Err(format!("Brave 搜索失败: {detail}"));
+    }
+    parse_brave_web_results(&body)
+}
+
 #[tauri::command]
 async fn search_related_index(
     app: AppHandle,
@@ -640,6 +850,133 @@ async fn list_library_source_documents(
     })
     .await
     .map_err(|e| format!("资料列表任务异常: {e}"))?
+}
+
+// ---------------------------------------------------------------------------
+// Related 固定卡片（P2a vertical slice）
+// 用户的 ☆固定/取消固定 从 localStorage 迁入 durable relations。
+// 固定作用域与既有 UI 一致：工作区级共享（scope 对象 ws://<workspace-key>），
+// 而不是当前打开的文档。前端只感知 pin/unpin/list，不接触 SQLite 细节。
+// ---------------------------------------------------------------------------
+
+/// 打开当前安装的 durable state 数据库（每次调用短连接，与索引访问方式一致）。
+fn open_durable_state(app: &AppHandle) -> Result<rusqlite::Connection, String> {
+    let path = state_store::resolve_state_db(app)?;
+    state_store::open_state_db(&path)
+}
+
+/// 工作区根对象 URI：ws://<workspace-key>。
+/// key 复用 index.db 目录的 short_hash 约定，同一目录在同一台机器上恒定。
+fn related_scope_uri(root: &Path) -> Result<ObjectUri, String> {
+    let key = short_hash(root.to_string_lossy().as_bytes());
+    ObjectUri::parse(&format!("ws://{key}")).map_err(|e| format!("构造工作区 scope 失败: {e}"))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelatedPinImportItem {
+    target_uri: String,
+    #[serde(default)]
+    snapshot: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+async fn pin_related(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    target_uri: String,
+    snapshot: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let root = workspace_root(&state)?;
+    let scope = related_scope_uri(&root)?;
+    let target = ObjectUri::parse(target_uri.trim())?;
+    if target == scope {
+        return Err("不能把工作区自身固定为关联".into());
+    }
+    let mut conn = open_durable_state(&app)?;
+    let workspace_key = scope.subject().to_string();
+    match state_store::create_relation(
+        &mut conn,
+        state_store::NewRelation {
+            source_uri: scope,
+            predicate: "related_to".into(),
+            target_uri: target,
+            anchor_id: None,
+            created_by: Some("human".into()),
+            confidence: None,
+            workspace_id: Some(workspace_key),
+            snapshot,
+        },
+    ) {
+        Ok(_) => Ok(()),
+        // 同一三元组重复固定按幂等成功处理，与旧行为一致
+        Err(e) if e.contains("相同的关联已存在") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[tauri::command]
+async fn unpin_related(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    target_uri: String,
+) -> Result<(), String> {
+    let root = workspace_root(&state)?;
+    let scope = related_scope_uri(&root)?;
+    let target = ObjectUri::parse(target_uri.trim())?;
+    let mut conn = open_durable_state(&app)?;
+    match state_store::find_relation(&conn, scope.as_str(), "related_to", target.as_str())? {
+        Some(record) => state_store::remove_relation(&mut conn, record.id),
+        // 重复取消/未固定过都视为成功，保持旧 Map.delete 的宽容语义
+        None => Ok(()),
+    }
+}
+
+/// 当前工作区已固定的关联（按固定顺序），快照从证据事件还原。
+#[tauri::command]
+async fn list_related_pins(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<state_store::PinnedRelationView>, String> {
+    let root = workspace_root(&state)?;
+    let scope = related_scope_uri(&root)?;
+    let conn = open_durable_state(&app)?;
+    state_store::list_relation_snapshots(&conn, scope.as_str(), "related_to")
+}
+
+/// legacy localStorage 固定项一次性导入：单事务、幂等跳过已有三元组，
+/// 保证重启两次不会产生重复关系或重复事件。返回实际新增条数。
+#[tauri::command]
+async fn import_related_pins(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    items: Vec<RelatedPinImportItem>,
+) -> Result<usize, String> {
+    let root = workspace_root(&state)?;
+    let scope = related_scope_uri(&root)?;
+    let links = items
+        .into_iter()
+        .map(|item| {
+            let target_uri = ObjectUri::parse(item.target_uri.trim())
+                .map_err(|e| format!("导入的固定项 URI 非法({}): {e}", item.target_uri))?;
+            Ok(state_store::RelationLinkImport {
+                target_uri,
+                created_by: Some("human".into()),
+                workspace_id: Some(scope.subject().to_string()),
+                snapshot: item.snapshot,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut conn = open_durable_state(&app)?;
+    state_store::import_relation_links(
+        &mut conn,
+        scope.clone(),
+        "related_to",
+        links
+            .into_iter()
+            .filter(|link| link.target_uri != scope)
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -927,6 +1264,7 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             choose_workspace,
             choose_document,
@@ -936,11 +1274,19 @@ pub fn run() {
             create_markdown,
             rebuild_index,
             search_index,
+            brave_api_key_status,
+            save_brave_api_key,
+            clear_brave_api_key,
+            search_web,
             search_related_index,
             add_library_source,
             refresh_library,
             search_library,
             search_related_library,
+            pin_related,
+            unpin_related,
+            list_related_pins,
+            import_related_pins,
             read_library_document,
             list_library_source_documents,
             feed_list_sources,
@@ -990,6 +1336,39 @@ mod tests {
     fn normal_directory_can_be_a_workspace() {
         let root = temp_dir("workspace-root");
         assert!(validate_workspace_root(&root).is_ok());
+    }
+
+    #[test]
+    fn brave_web_results_parse_into_safe_web_hits() {
+        let body = r#"
+        {
+          "web": {
+            "results": [
+              {
+                "title": "Brave Search",
+                "url": "https://search.brave.com/",
+                "description": "A web result",
+                "age": "2026-08-27"
+              },
+              {
+                "title": "not a web URL",
+                "url": "javascript:alert(1)",
+                "description": "must be ignored"
+              }
+            ]
+          }
+        }
+        "#;
+        let hits = parse_brave_web_results(body).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Brave Search");
+        assert_eq!(hits[0].age.as_deref(), Some("2026-08-27"));
+    }
+
+    #[test]
+    fn brave_web_results_allow_empty_result_sets() {
+        let hits = parse_brave_web_results(r#"{"type":"search"}"#).unwrap();
+        assert!(hits.is_empty());
     }
 
     #[test]

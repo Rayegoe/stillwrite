@@ -1,5 +1,6 @@
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event?.listen;
+const openUrl = window.__TAURI__.opener?.openUrl;
 
 const shell = document.querySelector("#shell");
 const sidebar = document.querySelector("#sidebar");
@@ -76,6 +77,7 @@ const cancelAnnotationButton = document.querySelector("#cancelAnnotation");
 const selectionActions = document.querySelector("#selectionActions");
 const selectionAnnotateButton = document.querySelector("#selectionAnnotate");
 const selectionAgentButton = document.querySelector("#selectionAgent");
+const selectionSearchButton = document.querySelector("#selectionSearch");
 const selectionRelatedButton = document.querySelector("#selectionRelated");
 const annotateSaveState = document.querySelector("#annotateSaveState");
 const annotateFoot = document.querySelector("#annotateFoot");
@@ -94,6 +96,14 @@ const agentAskRefList = document.querySelector("#agentAskRefList");
 const agentAskPrompt = document.querySelector("#agentAskPrompt");
 const agentAskCancel = document.querySelector("#agentAskCancel");
 const agentAskSend = document.querySelector("#agentAskSend");
+const settingsButton = document.querySelector("#settingsButton");
+const settingsDialog = document.querySelector("#settingsDialog");
+const settingsForm = document.querySelector("#settingsForm");
+const braveApiKeyInput = document.querySelector("#braveApiKey");
+const braveApiKeyStatus = document.querySelector("#braveApiKeyStatus");
+const clearBraveApiKeyButton = document.querySelector("#clearBraveApiKey");
+const cancelSettingsButton = document.querySelector("#cancelSettings");
+const saveSettingsButton = document.querySelector("#saveSettings");
 
 let rootPath = localStorage.getItem("stillwrite.rootPath");
 let currentFile = null;
@@ -146,12 +156,16 @@ let relatedHasSearched = false;
 let relatedSupplementSeeds = [];
 const RELATED_PIN_STORAGE_KEY = "stillwrite.relatedPinned.v1";
 const RELATED_PIN_SCOPE_SEPARATOR = "\u001f";
-const relatedPinnedItems = loadRelatedPinnedItems();
+// 固定关联的 durable 事实在 state.db（relations + events）；
+// 这个 Map 只是当前会话的运行时缓存，由 list_related_pins 水合。
+const relatedPinnedItems = new Map();
+let relatedPinsHydratedScope = null;
 
 const DEFAULT_REMOTE = "user@example.invalid:~/stillwrite.git";
 let autoSync = false; // 首次手动同步成功后开启自动同步
 let syncTimer = null;
 let searchTimer = null;
+let webSearchRequestToken = 0;
 let previewTimer = null;
 let lastTreeNodes = [];
 let documentLinkIndex = DocumentLinks.buildIndex([], rootPath);
@@ -270,37 +284,160 @@ function relatedPath(value) {
 		.replace(/\/$/, "");
 }
 
-function loadRelatedPinnedItems() {
+function relatedScopeStoragePrefix() {
+	return `${relatedPinScope()}${RELATED_PIN_SCOPE_SEPARATOR}`;
+}
+
+function validStoredRelatedItem(item) {
+	return (
+		Boolean(item) &&
+		typeof item === "object" &&
+		typeof item.key === "string" &&
+		["annotation", "library", "workspace"].includes(item.kind)
+	);
+}
+
+// durable URI 与卡片 key 的转换。UI key 保留旧格式（library:library://…），
+// 但 Relation target 必须使用规范的 library://… / workspace://… URI。
+function relatedItemTargetUri(item) {
+	if (item?.kind === "library") {
+		const uri = item.raw?.uri;
+		if (typeof uri === "string" && uri.includes("://")) return uri;
+	}
+	if (item?.kind === "workspace" || item?.kind === "annotation") {
+		const relative = relatedWorkspaceRelativePath(
+			item.path || item.raw?.path || "",
+		);
+		if (relative) return `workspace://${relative.replace(/^\/+/, "")}`;
+	}
+	const key = String(item?.key || "");
+	const separator = key.indexOf(":");
+	if (separator > 0) {
+		const scheme = key.slice(0, separator);
+		const subject = key.slice(separator + 1);
+		if (subject.startsWith(`${scheme}://`)) return subject;
+		return `${scheme}://${subject.replace(/^\/+/, "")}`;
+	}
+	return key;
+}
+
+function relatedKeyFromTargetUri(uri) {
+	const separator = uri.indexOf("://");
+	if (separator < 0) return uri;
+	const scheme = uri.slice(0, separator);
+	const subject = uri.slice(separator + 3);
+	// 兼容早期 P2a 试运行时误写入的 library://library://… URI。
+	if (scheme === "library" && subject.startsWith("library://"))
+		return `library:${subject}`;
+	return scheme === "library" ? `library:${uri}` : `${scheme}:${subject}`;
+}
+
+/// 把 legacy localStorage 固定项一次性导入 state.db：
+/// 仅迁移当前工作区 scope 的条目并从旧值中移除；其他工作区的条目留待
+/// 切换过去时再迁。导入后回读 DB 投影校验，成功才落盘剩余部分。
+async function migrateLegacyRelatedPins() {
+	const raw = localStorage.getItem(RELATED_PIN_STORAGE_KEY);
+	if (!raw) return;
+	let parsed;
 	try {
-		const parsed = JSON.parse(
-			localStorage.getItem(RELATED_PIN_STORAGE_KEY) || "{}",
-		);
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-			return new Map();
-		return new Map(
-			Object.entries(parsed).filter(
-				([storageKey, item]) =>
-					Boolean(storageKey) &&
-					item &&
-					typeof item === "object" &&
-					typeof item.key === "string" &&
-					["annotation", "library", "workspace"].includes(item.kind),
-			),
-		);
+		parsed = JSON.parse(raw);
 	} catch (error) {
-		console.warn("读取关联固定项失败", error);
-		return new Map();
+		console.warn("解析 legacy 关联固定项失败，保留原值等待重试", error);
+		return;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		console.warn("legacy 关联固定项格式无效，保留原值等待重试");
+		return;
+	}
+	const prefix = relatedScopeStoragePrefix();
+	const matched = [];
+	const leftover = {};
+	for (const [storageKey, item] of Object.entries(parsed)) {
+		if (storageKey.startsWith(prefix) && validStoredRelatedItem(item))
+			matched.push(item);
+		else leftover[storageKey] = item;
+	}
+	if (!matched.length) {
+		if (!Object.keys(leftover).length)
+			localStorage.removeItem(RELATED_PIN_STORAGE_KEY);
+		else if (JSON.stringify(leftover) !== JSON.stringify(parsed))
+			localStorage.setItem(RELATED_PIN_STORAGE_KEY, JSON.stringify(leftover));
+		return;
+	}
+	await invoke("import_related_pins", {
+		items: matched.map((item) => ({
+			targetUri: relatedItemTargetUri(item),
+			snapshot: serializableRelatedItem(item),
+		})),
+	});
+	// 校验：每个迁移项都必须能在 DB 投影中找到，否则保留旧值下次重试
+	const views = await invoke("list_related_pins");
+	const pinnedUris = new Set(views.map((view) => view.relation.target_uri));
+	if (!matched.every((item) => pinnedUris.has(relatedItemTargetUri(item))))
+		throw new Error("关联固定项迁移校验未通过");
+	if (Object.keys(leftover).length)
+		localStorage.setItem(RELATED_PIN_STORAGE_KEY, JSON.stringify(leftover));
+	else localStorage.removeItem(RELATED_PIN_STORAGE_KEY);
+}
+
+/// 以 state.db 为准水合当前工作区的固定关联缓存。
+/// 在 useWorkspace 内 await：保证任何相关面板渲染前缓存已就绪。
+async function hydrateRelatedPins() {
+	if (!rootPath || relatedPinsHydratedScope === rootPath) return;
+	relatedPinsHydratedScope = rootPath;
+	let migrationFailed = false;
+	try {
+		await migrateLegacyRelatedPins();
+	} catch (error) {
+		migrationFailed = true;
+		relatedPinsHydratedScope = null;
+		console.warn("legacy 关联固定项迁移失败，保留旧数据下次重试", error);
+	}
+	try {
+		const views = await invoke("list_related_pins");
+		const prefix = relatedScopeStoragePrefix();
+		for (const storageKey of [...relatedPinnedItems.keys()]) {
+			if (storageKey.startsWith(prefix)) relatedPinnedItems.delete(storageKey);
+		}
+		for (const view of views) {
+			const snapshot =
+				view.snapshot && typeof view.snapshot === "object" ? { ...view.snapshot } : {};
+			snapshot.key = relatedKeyFromTargetUri(view.relation.target_uri);
+			const restored = restoreRelatedPinnedItem(snapshot);
+			if (restored)
+				relatedPinnedItems.set(
+					`${prefix}${snapshot.key}`,
+					restored,
+				);
+		}
+		renderRelatedPanel();
+		if (migrationFailed) relatedPinsHydratedScope = null;
+	} catch (error) {
+		relatedPinsHydratedScope = null; // 允许下次重试
+		console.warn("读取固定关联失败", error);
 	}
 }
 
-function persistRelatedPinnedItems() {
+/// ★/☆ 切换后的持久化写入：与旧的 Map 写入语义一致，只是事实源换成 state.db。
+async function persistRelatedPinChange(item, pinned, storageKey, previous) {
 	try {
-		localStorage.setItem(
-			RELATED_PIN_STORAGE_KEY,
-			JSON.stringify(Object.fromEntries(relatedPinnedItems)),
-		);
+		if (pinned)
+			await invoke("pin_related", {
+				targetUri: relatedItemTargetUri(item),
+				snapshot: serializableRelatedItem(item),
+			});
+		else await invoke("unpin_related", { targetUri: relatedItemTargetUri(item) });
 	} catch (error) {
-		console.warn("保存关联固定项失败", error);
+		console.warn("同步关联固定状态失败", error);
+		// 后端写入失败时撤销乐观 UI 更新；若用户已经再次点击，则保留最新意图。
+		if (relatedPinnedItems.has(storageKey) !== pinned) return;
+		if (pinned) relatedPinnedItems.delete(storageKey);
+		else if (previous) relatedPinnedItems.set(storageKey, previous);
+		item.pinned = !pinned;
+		relatedItems = [...relatedItems].sort(
+			(a, b) => Number(b.pinned) - Number(a.pinned),
+		);
+		renderRelatedPanel();
 	}
 }
 
@@ -363,9 +500,10 @@ function currentPinnedRelatedItems() {
 function toggleRelatedPinned(item) {
 	const storageKey = relatedPinStorageKey(item);
 	const pinned = !relatedPinnedItems.has(storageKey);
+	const previous = relatedPinnedItems.get(storageKey);
 	if (pinned) relatedPinnedItems.set(storageKey, serializableRelatedItem(item));
 	else relatedPinnedItems.delete(storageKey);
-	persistRelatedPinnedItems();
+	void persistRelatedPinChange(item, pinned, storageKey, previous);
 	item.pinned = pinned;
 	relatedItems = [...relatedItems].sort(
 		(a, b) => Number(b.pinned) - Number(a.pinned),
@@ -1030,6 +1168,21 @@ function annotationSourcePath(sidecarPath) {
 	return workspacePathExists(sourcePath) ? sourcePath : null;
 }
 
+function workspacePathForRelated(path) {
+	const value = String(path || "");
+	if (!value || !rootPath) return value;
+	const normalized = value.replaceAll("\\", "/");
+	const root = rootPath.replaceAll("\\", "/").replace(/\/$/, "");
+	if (
+		normalized === root ||
+		normalized.startsWith(`${root}/`) ||
+		/^\/?[A-Za-z]:\//.test(normalized) ||
+		normalized.startsWith("/")
+	)
+		return value;
+	return `${root}/${normalized.replace(/^\/+/, "")}`;
+}
+
 async function openRelatedItem(item) {
 	if (item.kind === "library") {
 		await openLibraryDocument(item.raw);
@@ -1037,12 +1190,14 @@ async function openRelatedItem(item) {
 	}
 	if (item.kind === "annotation") {
 		const sourcePath = annotationSourcePath(item.path) || item.path;
-		await openFile(sourcePath, basename(sourcePath), null);
+		const openPath = workspacePathForRelated(sourcePath);
+		await openFile(openPath, basename(openPath), null);
 		setSupportView("annotation");
 		setAnnotateVisible(true);
 		return;
 	}
-	await openFile(item.path, basename(item.path), null);
+	const openPath = workspacePathForRelated(item.path);
+	await openFile(openPath, basename(openPath), null);
 }
 
 function renderCitationSummary() {
@@ -1948,6 +2103,7 @@ async function addLibrarySource() {
 }
 
 async function setSidebarMode(mode) {
+	webSearchRequestToken += 1;
 	const nextLibraryMode = mode === "library";
 	const nextAgentMode = mode === "agent";
 	if (libraryMode === nextLibraryMode && agentMode === nextAgentMode) {
@@ -2017,12 +2173,14 @@ async function useWorkspace(data) {
 	currentLibraryDocument = null;
 	currentAgentDocument = null;
 	rootPath = data.root;
+	relatedPinsHydratedScope = null; // 换工作区必须重新水合对应的固定关联
 	localStorage.setItem("stillwrite.rootPath", rootPath);
 	workspaceNameEl.textContent = basename(rootPath);
 	workspaceNameEl.title = rootPath;
 	lastTreeNodes = data.nodes;
 	documentLinkIndex = DocumentLinks.buildIndex(data.nodes, rootPath);
 	renderTree(data.nodes);
+	await hydrateRelatedPins();
 }
 
 async function chooseWorkspace() {
@@ -3129,6 +3287,94 @@ function showEditorSelectionAction() {
 	positionSelectionActions(rect, { below: true });
 }
 
+function describeBraveApiKeyStatus(source) {
+	if (source === "settings") return "已配置（输入新 Key 可替换）";
+	if (source === "env") return "当前使用环境变量；保存后将优先使用设置中的 Key";
+	return "尚未配置";
+}
+
+async function refreshBraveApiKeyStatus() {
+	try {
+		const source = await invoke("brave_api_key_status");
+		braveApiKeyStatus.textContent = describeBraveApiKeyStatus(source);
+		return source;
+	} catch (error) {
+		console.error("读取 Brave API Key 配置状态失败", error);
+		braveApiKeyStatus.textContent = `读取配置失败：${String(error)}`;
+		return null;
+	}
+}
+
+async function openSettings() {
+	braveApiKeyInput.value = "";
+	braveApiKeyStatus.textContent = "读取配置中…";
+	if (!settingsDialog.open) settingsDialog.showModal();
+	await refreshBraveApiKeyStatus();
+	requestAnimationFrame(() => braveApiKeyInput.focus());
+}
+
+async function saveSettings() {
+	const key = braveApiKeyInput.value.trim();
+	if (!key) {
+		braveApiKeyStatus.textContent = "请输入 API Key；不修改请取消，移除请点击清除";
+		braveApiKeyInput.focus();
+		return;
+	}
+	saveSettingsButton.disabled = true;
+	clearBraveApiKeyButton.disabled = true;
+	braveApiKeyStatus.textContent = "保存中…";
+	try {
+		await invoke("save_brave_api_key", { key });
+		settingsDialog.close();
+	} catch (error) {
+		console.error("保存 Brave API Key 失败", error);
+		braveApiKeyStatus.textContent = `保存失败：${String(error)}`;
+	} finally {
+		saveSettingsButton.disabled = false;
+		clearBraveApiKeyButton.disabled = false;
+	}
+}
+
+async function clearBraveApiKey() {
+	clearBraveApiKeyButton.disabled = true;
+	saveSettingsButton.disabled = true;
+	braveApiKeyStatus.textContent = "清除中…";
+	try {
+		await invoke("clear_brave_api_key");
+		braveApiKeyInput.value = "";
+		await refreshBraveApiKeyStatus();
+	} catch (error) {
+		console.error("清除 Brave API Key 失败", error);
+		braveApiKeyStatus.textContent = `清除失败：${String(error)}`;
+	} finally {
+		clearBraveApiKeyButton.disabled = false;
+		saveSettingsButton.disabled = false;
+	}
+}
+
+async function searchWebFromSelection(range) {
+	const query = range?.quote?.trim();
+	if (!query) return;
+	searchInput.value = query;
+	clearTimeout(searchTimer);
+	searchTimer = null;
+	const requestToken = ++webSearchRequestToken;
+	renderWebSearchMessage("正在通过 Brave 搜索互联网…");
+	try {
+		const hits = await invoke("search_web", { query, count: 10 });
+		if (requestToken === webSearchRequestToken)
+			renderWebSearchResults(hits, query);
+	} catch (error) {
+		if (requestToken !== webSearchRequestToken) return;
+		console.error("Brave 互联网搜索失败", error);
+		renderWebSearchMessage(
+			String(error).includes("未配置")
+				? "未配置 Brave API Key，请点击左下角 ⚙ 设置"
+				: `Brave 搜索失败：${String(error)}`,
+		);
+	}
+}
+
 // 源文档是否允许批注（批注文件与汇总文件自身不能再批注）
 function isAnnotatablePath(path) {
 	if (!path) return false;
@@ -3193,6 +3439,7 @@ function setAnnotateVisible(visible) {
 }
 
 function clearSearch() {
+	webSearchRequestToken += 1;
 	searchInput.value = "";
 	if (libraryMode) {
 		renderLibraryHome();
@@ -3254,6 +3501,62 @@ function renderSearchResults(hits) {
 		});
 		fragment.appendChild(row);
 	});
+	treeEl.appendChild(fragment);
+}
+
+function renderWebSearchMessage(message) {
+	treeEl.replaceChildren();
+	const tip = document.createElement("div");
+	tip.className = "empty-tip web-search-message";
+	tip.textContent = message;
+	treeEl.appendChild(tip);
+}
+
+function renderWebSearchResults(hits, query) {
+	treeEl.replaceChildren();
+	const heading = document.createElement("div");
+	heading.className = "web-search-heading";
+	heading.textContent = `Brave 网页搜索 · ${hits.length} 条`;
+	heading.title = query;
+	treeEl.appendChild(heading);
+	if (!hits.length) {
+		const tip = document.createElement("div");
+		tip.className = "empty-tip web-search-message";
+		tip.textContent = "Brave 没有返回匹配的网页";
+		treeEl.appendChild(tip);
+		return;
+	}
+	const fragment = document.createDocumentFragment();
+	for (const hit of hits) {
+		const row = document.createElement("a");
+		row.className = "tree-file search-hit web-search-hit";
+		row.href = hit.url;
+		row.target = "_blank";
+		row.rel = "noreferrer";
+		const title = document.createElement("span");
+		title.className = "hit-title";
+		title.textContent = hit.title;
+		const description = document.createElement("span");
+		description.className = "hit-snippet";
+		description.textContent = hit.description || hit.url;
+		const meta = document.createElement("span");
+		meta.className = "web-search-meta";
+		let host = hit.url;
+		try {
+			host = new URL(hit.url).hostname;
+		} catch (_) {}
+		meta.textContent = hit.age ? `${host} · ${hit.age}` : host;
+		row.append(title, description, meta);
+		row.addEventListener("click", (event) => {
+			if (!openUrl) return;
+			event.preventDefault();
+			void openUrl(hit.url).catch((error) => {
+				console.error("打开网页失败", error);
+				markError("无法打开网页");
+			});
+		});
+		fragment.appendChild(row);
+	}
 	treeEl.appendChild(fragment);
 }
 
@@ -3526,6 +3829,13 @@ document.querySelector("#newFile").addEventListener("click", async () => {
 });
 
 document.querySelector("#syncButton").addEventListener("click", doSync);
+settingsButton.addEventListener("click", () => void openSettings());
+settingsForm.addEventListener("submit", (event) => {
+	event.preventDefault();
+	void saveSettings();
+});
+cancelSettingsButton.addEventListener("click", () => settingsDialog.close());
+clearBraveApiKeyButton.addEventListener("click", () => void clearBraveApiKey());
 askAgentButton.addEventListener("click", () => void beginAgentQuestion());
 relatedButton.addEventListener("click", () => {
 	setAnnotateVisible(true);
@@ -3591,6 +3901,9 @@ selectionAnnotateButton.addEventListener("pointerdown", (event) => {
 selectionAgentButton.addEventListener("pointerdown", (event) => {
 	event.preventDefault();
 });
+selectionSearchButton.addEventListener("pointerdown", (event) => {
+	event.preventDefault();
+});
 selectionRelatedButton.addEventListener("pointerdown", (event) => {
 	event.preventDefault();
 });
@@ -3603,6 +3916,11 @@ selectionAgentButton.addEventListener("click", () => {
 	const range = pendingPreviewSelection;
 	hideSelectionAnnotate();
 	if (range) void beginAgentQuestion(range);
+});
+selectionSearchButton.addEventListener("click", () => {
+	const range = pendingPreviewSelection;
+	hideSelectionAnnotate();
+	if (range) void searchWebFromSelection(range);
 });
 selectionRelatedButton.addEventListener("click", () => {
 	const range = pendingPreviewSelection;
@@ -3618,6 +3936,7 @@ document.addEventListener("pointerdown", (event) => {
 		hideSelectionAnnotate();
 });
 searchInput.addEventListener("input", () => {
+	webSearchRequestToken += 1;
 	clearTimeout(searchTimer);
 	searchTimer = setTimeout(runSearch, 250);
 });

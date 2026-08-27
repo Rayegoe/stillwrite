@@ -104,7 +104,7 @@
 
 - [ ] annotation metadata → SQLite
 - [ ] selection anchors → SQLite
-- [ ] related pinned items → relations
+- [x] related pinned items → relations（P2a 已完成：`ws://<workspace-key>` scope + 幂等 legacy 导入）
 - [ ] citation basket → context sets
 - [ ] Agent Work metadata → thread/turn/work
 - [ ] Agent history → turns

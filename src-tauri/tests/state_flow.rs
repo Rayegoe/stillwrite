@@ -44,13 +44,16 @@ fn selected_quote_to_relation(
         let relation = create_relation_in_tx(
             tx,
             NewRelation {
-                source_uri: document_uri.clone(),
+                // 选区级 Relation 的 source 必须是 anchor URI；document_uri
+                // 只记录在 anchor.document_uri，不参与选区关系的唯一性。
+                source_uri: ObjectUri::anchor(anchor.id),
                 predicate: "related_to".into(),
                 target_uri: target_uri.clone(),
                 anchor_id: Some(anchor.id),
                 created_by: None,
                 confidence: None,
                 workspace_id: None,
+                snapshot: None,
             },
         )?;
         Ok((anchor, relation.id))
@@ -76,7 +79,8 @@ fn composite_command_commits_state_and_event_together() {
         .starts_with("relation://"));
 
     // 状态与事件同时可见
-    let hits: Vec<NeighborHit> = neighbors(&conn, document.as_str(), None, 10).unwrap();
+    let anchor_uri = ObjectUri::anchor(_anchor.id);
+    let hits: Vec<NeighborHit> = neighbors(&conn, anchor_uri.as_str(), None, 10).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].direction, RelationDirection::Outgoing);
     assert_eq!(hits[0].neighbor_uri, library_doc.as_str());
@@ -86,8 +90,42 @@ fn composite_command_commits_state_and_event_together() {
     assert_eq!(last.action, event_action::RELATION_CREATED);
     assert_eq!(
         last.payload.as_ref().unwrap()["source_uri"].as_str(),
-        Some(document.as_str())
+        Some(anchor_uri.as_str())
     );
+}
+
+#[test]
+fn distinct_selected_anchors_can_link_to_the_same_target() {
+    let mut conn = open_state_db(&tmp_dir("anchor-relation-grain").join("state.db")).unwrap();
+    let document = ObjectUri::workspace("草稿/第一章.md").unwrap();
+    let target = ObjectUri::library("arxiv-src", "papers/agent-memory.md").unwrap();
+
+    let (first_anchor, _) =
+        selected_quote_to_relation(&mut conn, document.clone(), "第一处选区", target.clone())
+            .unwrap();
+    let (second_anchor, _) =
+        selected_quote_to_relation(&mut conn, document, "第二处选区", target.clone()).unwrap();
+
+    assert_ne!(first_anchor.id, second_anchor.id);
+    assert_eq!(
+        neighbors(&conn, ObjectUri::anchor(first_anchor.id).as_str(), None, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        neighbors(
+            &conn,
+            ObjectUri::anchor(second_anchor.id).as_str(),
+            None,
+            10,
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    // P1 暂不为 anchor 自身追加事件；两次 Relation 各留下一个 created 事件。
+    assert_eq!(list_events(&conn, 10).unwrap().len(), 2);
 }
 
 #[test]
@@ -106,6 +144,7 @@ fn failed_composite_command_rolls_back_every_primitive() {
             created_by: None,
             confidence: None,
             workspace_id: None,
+            snapshot: None,
         },
     )
     .unwrap();
@@ -135,6 +174,7 @@ fn failed_composite_command_rolls_back_every_primitive() {
                 created_by: None,
                 confidence: None,
                 workspace_id: None,
+                snapshot: None,
             },
         )?;
         Ok(())
@@ -183,4 +223,67 @@ fn context_and_relation_survive_reopen_like_durable_facts() {
     let conn = open_state_db(&db_path).unwrap();
     assert_eq!(list_events(&conn, 10).unwrap().len(), 1);
     assert_eq!(list_context_items(&conn, set.id).unwrap().len(), 1);
+}
+
+/// P2a legacy 迁移契约：固定项从 localStorage 导入后，重启两次必须零重复——
+/// 关系不重复，relation.created 事件也不重复（幂等导入连事件一起跳过）。
+#[test]
+fn legacy_pin_import_is_idempotent_across_restarts() {
+    use stillwrite_lib::state_store::{
+        import_relation_links, list_relation_snapshots, RelationLinkImport,
+    };
+
+    let dir = tmp_dir("pin-import");
+    let db_path = dir.join("state.db");
+    let scope = ObjectUri::parse("ws://7f3a9c1e2b4d5a6f").unwrap();
+    let legacy_items = vec![
+        (
+            "library://rss/daily/brief.md",
+            serde_json::json!({"key": "library:rss/daily/brief.md", "kind": "library", "title": "日报"}),
+        ),
+        (
+            "workspace://笔记/常驻.md",
+            serde_json::json!({"key": "workspace:笔记/常驻.md", "kind": "workspace", "title": "常驻参考"}),
+        ),
+        // 非法 URI 必须让整批失败（单事务），而不是悄悄丢数据
+    ];
+
+    let run_import = || -> Result<usize, String> {
+        let mut conn = open_state_db(&db_path)?;
+        let links = legacy_items
+            .iter()
+            .map(|(uri, snapshot)| {
+                Ok(RelationLinkImport {
+                    target_uri: ObjectUri::parse(uri)?,
+                    created_by: Some("human".into()),
+                    workspace_id: Some(scope.subject().to_string()),
+                    snapshot: Some(snapshot.clone()),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        import_relation_links(&mut conn, scope.clone(), "related_to", links)
+    };
+
+    assert_eq!(run_import().unwrap(), 2, "首次导入全部新增");
+    drop(open_state_db(&db_path).unwrap());
+
+    // 模拟第二次启动再次触发迁移
+    assert_eq!(run_import().unwrap(), 0, "重启后重复导入必须是 no-op");
+
+    let conn = open_state_db(&db_path).unwrap();
+    let views = list_relation_snapshots(&conn, scope.as_str(), "related_to").unwrap();
+    assert_eq!(views.len(), 2);
+    assert_eq!(
+        views[0].snapshot.as_ref().unwrap()["title"],
+        serde_json::Value::String("日报".into())
+    );
+    // 两条新增关系恰好各带一个 relation.created：没有第三个事件 = 没有重复导入痕迹
+    let events = list_events(&conn, 20).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.action == event_action::RELATION_CREATED)
+            .count(),
+        2
+    );
 }

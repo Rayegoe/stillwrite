@@ -104,10 +104,10 @@ Adapter
 当前选中文字：
 
 ```text
-＋批注 | 问 Agent | 搜索 | ＋关联
+＋批注 | 问 Agent | 联网搜索 | ＋关联
 ```
 
-是核心 contextual interaction；既有动作语义保持不变，搜索作为同一浮层的本地检索入口。
+是核心 contextual interaction；既有动作语义保持不变，联网搜索作为同一浮层的外部网页检索入口，密钥只由后端管理，优先读取设置页保存值，环境变量作为回退。
 
 右上重复的全局 `问 Agent` 不代表独立能力，后续 UI 清理时删除。
 
@@ -348,7 +348,7 @@ UI 是 projection layer。
 保留 contextual actions：
 
 ```text
-批注 | 问 Agent | 搜索 | ＋关联
+批注 | 问 Agent | 联网搜索 | ＋关联
 ```
 
 ### Left navigation

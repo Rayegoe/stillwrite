@@ -258,6 +258,7 @@ vNext P1 已建立独立于派生索引的 durable 数据库，位置为 `<AppDa
 - **Relation URI 粒度原则**：选区级 Relation 的 `source_uri` 直接使用 `anchor://<id>`；文档级 Relation 才使用 `workspace://...` / `library://...`。`relations.anchor_id` 只是回溯辅助，不参与 `(source_uri, predicate, target_uri)` 唯一性判定；
 - `relation.removed` 事件 payload 携带完整快照（predicate / source_uri / target_uri / removed_evidence_event_id）——relation 行删除后不可查询，撤销审计只能依赖事件本身；
 - URI 经 `ObjectUri` 统一校验后入库（`workspace://` `library://` `anchor://` 等 validated wrapper，不做封闭 enum）；
+- **P2a 固定关联已迁移**（第一个 vertical slice）：用户的 ☆固定/取消固定 不再写入 `localStorage['stillwrite.relatedPinned.v1']`，改经 `pin_related / unpin_related / list_related_pins / import_related_pins` 命令落入 relations + events。作用域与旧 UI 一致为工作区级共享，建模为 `ws://<workspace-key>` 根对象（key 复用 index 目录的 short_hash）；卡片展示快照存在 `relation.created` 事件 payload 的 `snapshot` 字段里；legacy 值按工作区前缀分批幂等导入、校验投影后才移除（重复启动不产生重复关系或事件）；
 - 尚未迁移：annotations metadata、agent threads/turns/runs、works、memories、sources——各自对应的 vertical slice 迁移时再接入同一套事务模式。
 
 ## 4. Transaction Rule

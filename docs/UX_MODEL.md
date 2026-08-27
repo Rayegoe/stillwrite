@@ -66,8 +66,10 @@ playable
 保留选区动作：
 
 ```text
-＋批注 | 问 Agent | 搜索 | ＋关联
+＋批注 | 问 Agent | 联网搜索 | ＋关联
 ```
+
+`联网搜索` 将选区发送到 Brave Search API，在 StillWrite 侧栏展示网页结果；API 密钥通过左下角设置由后端保存，未保存时回退到环境变量，不写入 Markdown 或 Workspace SQLite。
 
 `关联 n` 如果保留，只表示打开/查看已有相关数据，不负责创建关系。
 

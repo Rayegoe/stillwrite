@@ -599,6 +599,9 @@ pub struct NewRelation {
     pub created_by: Option<String>,
     pub confidence: Option<f64>,
     pub workspace_id: Option<String>,
+    /// 卡片等 UI 投影快照。只进 relation.created 事件的 payload，
+    /// 不污染 relations 行本身（行永远只有 URI 与事实字段）。
+    pub snapshot: Option<serde_json::Value>,
 }
 
 const RELATION_COLUMNS: &str = "id, source_uri, predicate, target_uri, anchor_id, evidence_event_id, created_by, confidence, created_at, updated_at";
@@ -665,11 +668,17 @@ pub fn create_relation_in_tx(
             workspace_id: relation.workspace_id.clone(),
             object_uri: Some(ObjectUri::relation(record.id)),
             target_uri: Some(relation.target_uri.clone()),
-            payload: Some(serde_json::json!({
-                "predicate": record.predicate,
-                "source_uri": record.source_uri,
-                "target_uri": record.target_uri,
-            })),
+            payload: Some({
+                let mut payload = serde_json::json!({
+                    "predicate": record.predicate,
+                    "source_uri": record.source_uri,
+                    "target_uri": record.target_uri,
+                });
+                if let Some(snapshot) = relation.snapshot {
+                    payload["snapshot"] = snapshot;
+                }
+                payload
+            }),
             ..NewEvent::default()
         },
     )?;
@@ -800,6 +809,137 @@ pub fn neighbors(
     hits.sort_by_key(|hit| hit.relation.id);
     hits.truncate(limit);
     Ok(hits)
+}
+
+/// 按 (source, predicate, target) 精确查找 relation；不存在返回 None。
+/// unpin / 幂等导入都依赖它，避免依赖 SQLite 错误字符串做控制流。
+pub fn find_relation(
+    conn: &Connection,
+    source_uri: &str,
+    predicate: &str,
+    target_uri: &str,
+) -> Result<Option<RelationRecord>, String> {
+    let sql = format!(
+        "SELECT {RELATION_COLUMNS} FROM relations WHERE source_uri = ?1 AND predicate = ?2 AND target_uri = ?3"
+    );
+    conn.query_row(&sql, params![source_uri, predicate, target_uri], row_to_relation)
+        .optional()
+        .map_err(|e| format!("查询 relation 失败: {e}"))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinnedRelationView {
+    pub relation: RelationRecord,
+    /// 创建关系时随 relation.created 事件保存的展示快照（标题/摘要/来源等）。
+    /// relation 行只存 URI；卡片渲染所需的投影数据以事件 payload 为证据留档。
+    pub snapshot: Option<serde_json::Value>,
+}
+
+/// 列出某 scope/source 下指定 predicate 的全部关系（按创建顺序），
+/// 并从各自的证据事件中还原展示快照。
+pub fn list_relation_snapshots(
+    conn: &Connection,
+    source_uri: &str,
+    predicate: &str,
+) -> Result<Vec<PinnedRelationView>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT r.id, r.source_uri, r.predicate, r.target_uri, r.anchor_id, r.evidence_event_id,
+                    r.created_by, r.confidence, r.created_at, r.updated_at
+             FROM relations r
+             WHERE r.source_uri = ?1 AND r.predicate = ?2
+             ORDER BY r.id ASC"
+        ))
+        .map_err(|e| format!("查询固定关联失败: {e}"))?;
+    let rows = stmt
+        .query_map(params![source_uri, predicate], |row| {
+            let relation = row_to_relation(row)?;
+            Ok(relation)
+        })
+        .map_err(|e| format!("查询固定关联失败: {e}"))?;
+    let relations: Vec<RelationRecord> = rows.filter_map(|r| r.ok()).collect();
+
+    let mut views = Vec::with_capacity(relations.len());
+    for relation in relations {
+        let snapshot = match relation.evidence_event_id {
+            Some(event_id) => {
+                let payload_json: Option<String> = conn
+                    .query_row(
+                        "SELECT payload_json FROM events WHERE id = ?1",
+                        params![event_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| format!("读取证据事件失败: {e}"))?;
+                payload_json
+                    .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                    .and_then(|payload| {
+                        payload.get("snapshot").cloned().filter(|s| !s.is_null())
+                    })
+            }
+            None => None,
+        };
+        views.push(PinnedRelationView {
+            relation,
+            snapshot,
+        });
+    }
+    Ok(views)
+}
+
+#[derive(Debug, Clone)]
+pub struct RelationLinkImport {
+    pub target_uri: ObjectUri,
+    pub created_by: Option<String>,
+    pub workspace_id: Option<String>,
+    pub snapshot: Option<serde_json::Value>,
+}
+
+/// 幂等批量导入「scope → predicate → target」关系：已存在的三元组静默跳过。
+/// legacy localStorage 迁移必须满足“重复执行不产生重复关系、也不产生重复事件”，
+/// 引用篮等后续迁移复用同一入口。返回实际新增条数（整个批次单事务提交）。
+pub fn import_relation_links(
+    conn: &mut Connection,
+    source_uri: ObjectUri,
+    predicate: &str,
+    items: Vec<RelationLinkImport>,
+) -> Result<usize, String> {
+    if predicate.trim().is_empty() {
+        return Err("批量导入缺少 predicate".into());
+    }
+    // 计数器必须在闭包内维护并经返回值传出：move 闭包会拷贝外部变量，
+    // 在外部累加会永远读到初始值。
+    let imported = tx_command(conn, move |tx| {
+        let mut imported = 0usize;
+        for item in items {
+            let RelationLinkImport {
+                target_uri,
+                created_by,
+                workspace_id,
+                snapshot,
+            } = item;
+            if find_relation(tx, source_uri.as_str(), predicate, target_uri.as_str())?.is_some() {
+                continue;
+            }
+            create_relation_in_tx(
+                tx,
+                NewRelation {
+                    source_uri: source_uri.clone(),
+                    predicate: predicate.to_string(),
+                    target_uri,
+                    anchor_id: None,
+                    created_by,
+                    confidence: None,
+                    workspace_id,
+                    snapshot,
+                },
+            )?;
+            imported += 1;
+        }
+        Ok(imported)
+    })?;
+    Ok(imported)
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,6 +1314,7 @@ mod tests {
                 created_by: None,
                 confidence: None,
                 workspace_id: None,
+                snapshot: None,
             },
         )
         .unwrap();
@@ -1300,6 +1441,7 @@ mod tests {
                 created_by: None,
                 confidence: None,
                 workspace_id: None,
+                snapshot: None,
             },
         )
         .unwrap();
@@ -1350,6 +1492,7 @@ mod tests {
                 created_by: None,
                 confidence: None,
                 workspace_id: None,
+                snapshot: None,
             },
         );
         assert!(duplicate.is_err());
@@ -1478,6 +1621,7 @@ mod tests {
                 created_by: None,
                 confidence: None,
                 workspace_id: None,
+                snapshot: None,
             },
         )
         .unwrap();
@@ -1529,6 +1673,7 @@ mod tests {
                 created_by: None,
                 confidence: None,
                 workspace_id: None,
+                snapshot: None,
             },
         )
         .unwrap();
@@ -1551,6 +1696,82 @@ mod tests {
     }
 
     #[test]
+    fn find_relation_and_snapshot_views_roundtrip() {
+        let (_dir, mut conn) = open_fresh();
+        let scope = ObjectUri::parse("ws://7f3a9c1e2b4d5a6f").unwrap();
+        let target_a = ObjectUri::library("arxiv", "papers/memory.md").unwrap();
+        let target_b = ObjectUri::workspace("notes/ideas.md").unwrap();
+        let card = serde_json::json!({
+            "key": "library:arxiv/papers/memory.md",
+            "kind": "library",
+            "title": "Agent Memory 论文",
+            "snippet": "记忆应当压缩自证据",
+            "source": "arxiv · papers/memory.md",
+        });
+
+        create_relation(
+            &mut conn,
+            NewRelation {
+                source_uri: scope.clone(),
+                predicate: "related_to".into(),
+                target_uri: target_a.clone(),
+                anchor_id: None,
+                created_by: Some("human".into()),
+                confidence: None,
+                workspace_id: None,
+                snapshot: Some(card.clone()),
+            },
+        )
+        .unwrap();
+        // 第二条不带快照字段差异（payload 结构一致，只是内容不同）
+        create_relation(
+            &mut conn,
+            NewRelation {
+                source_uri: scope.clone(),
+                predicate: "related_to".into(),
+                target_uri: target_b.clone(),
+                anchor_id: None,
+                created_by: None,
+                confidence: None,
+                workspace_id: None,
+                snapshot: None,
+            },
+        )
+        .unwrap();
+
+        let found = find_relation(&conn, scope.as_str(), "related_to", target_a.as_str())
+            .unwrap()
+            .expect("刚创建的关系必须能被三元组查回");
+        assert!(find_relation(&conn, scope.as_str(), "contradicts", target_a.as_str())
+            .unwrap()
+            .is_none());
+
+        let views = list_relation_snapshots(&conn, scope.as_str(), "related_to").unwrap();
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].relation.target_uri, target_a.as_str());
+        // 展示快照原样从证据事件还原
+        assert_eq!(views[0].snapshot.as_ref(), Some(&card));
+        assert_eq!(
+            views[1].relation.target_uri, target_b.as_str(),
+            "按创建顺序返回"
+        );
+        // 未携带快照的关系返回 None 而不是报错
+        assert!(views[1].snapshot.is_none());
+
+        // 删除后 find 归零、视图同步减少
+        remove_relation(&mut conn, found.id).unwrap();
+        assert!(find_relation(&conn, scope.as_str(), "related_to", target_a.as_str())
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            list_relation_snapshots(&conn, scope.as_str(), "related_to")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn duplicate_triple_is_rejected_but_new_predicate_allowed() {
         let (_dir, mut conn) = open_fresh();
         let mut new_relation = |predicate: &str| {
@@ -1564,6 +1785,7 @@ mod tests {
                     created_by: None,
                     confidence: None,
                     workspace_id: None,
+                    snapshot: None,
                 },
             )
         };
@@ -1580,6 +1802,7 @@ mod tests {
                 created_by: None,
                 confidence: None,
                 workspace_id: None,
+                snapshot: None,
             },
         )
         .is_err());
