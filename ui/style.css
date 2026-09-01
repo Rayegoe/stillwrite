@@ -126,10 +126,15 @@ textarea:focus-visible {
 .format-toolbar {
 	display: flex;
 	align-items: center;
-	gap: 12px;
-	padding: 0 10px;
-	border-bottom: 1px solid var(--line);
-	background: rgba(246, 244, 239, 0.96);
+	gap: 10px;
+	padding: 4px 10px;
+	margin: 0 auto;
+	max-width: min(760px, 100%);
+	width: fit-content;
+	align-self: center;
+	border-radius: 10px;
+	background: #1c1b19;
+	box-shadow: 0 2px 8px rgba(35, 31, 26, 0.18);
 	user-select: none;
 	overflow-x: auto;
 	overflow-y: hidden;
@@ -142,7 +147,8 @@ textarea:focus-visible {
 .format-group {
 	display: flex;
 	align-items: center;
-	gap: 3px;
+	gap: 2px;
+	color: #e8e4dc;
 }
 .format-group + .format-group {
 	margin-left: 6px;
@@ -160,17 +166,17 @@ textarea:focus-visible {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	color: var(--ink);
+	color: #e8e4dc;
 	white-space: nowrap;
 }
 .format-btn:hover {
-	background: var(--hover);
+	background: rgba(232, 228, 220, 0.14);
 }
 .format-btn:active {
-	background: var(--active);
+	background: rgba(232, 228, 220, 0.24);
 }
 .format-btn.active {
-	background: var(--active);
+	background: rgba(232, 228, 220, 0.24);
 }
 .format-btn:disabled {
 	opacity: 0.35;
@@ -223,12 +229,27 @@ textarea:focus-visible {
 	top: calc(100% + 7px);
 	left: 0;
 	z-index: 30;
-	width: 250px;
+	width: 300px;
 	padding: 6px;
 	border: 1px solid var(--line);
 	border-radius: 10px;
 	background: var(--paper);
 	box-shadow: 0 14px 38px rgba(25, 22, 18, 0.18);
+}
+.file-menu-popover.submenu {
+	top: -7px;
+	left: calc(100% + 6px);
+	width: 300px;
+}
+/* 视口右缘放不下时翻到触发项左侧（openSubmenu 计算） */
+.file-menu-popover.submenu.open-left {
+	left: auto;
+	right: calc(100% + 6px);
+}
+/* 视口下缘放不下时整体上移并对齐底边 */
+.file-menu-popover.submenu.open-up {
+	top: auto;
+	bottom: -7px;
 }
 .file-menu-popover[hidden] {
 	display: none;
@@ -248,9 +269,17 @@ textarea:focus-visible {
 	text-align: left;
 	cursor: pointer;
 }
-.file-menu-popover button:hover,
-.file-menu-popover button:focus-visible {
+.file-menu-popover button:hover:not([disabled]),
+.file-menu-popover button:focus-visible:not([disabled]) {
 	background: var(--hover);
+}
+.file-menu-popover button:focus-visible {
+	outline: 1px solid var(--line);
+	outline-offset: -1px;
+}
+.file-menu-popover button[disabled] {
+	cursor: default;
+	opacity: 0.4;
 }
 .file-menu-popover kbd {
 	margin-left: auto;
@@ -261,10 +290,96 @@ textarea:focus-visible {
 	font-size: 10px;
 	font-weight: 400;
 }
+.file-menu-submenu-wrap {
+	position: relative;
+}
+.submenu-chevron {
+	margin-left: auto;
+	color: var(--muted);
+	font-size: 13px;
+}
+/* 最近打开：两行条目（名称 + muted 路径） */
+.file-menu-popover button.recent-item {
+	height: auto;
+	padding: 5px 9px;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 1px;
+}
+.recent-item-line {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+}
+.recent-item-icon {
+	color: var(--muted);
+	font-size: 11px;
+	flex: none;
+}
+.recent-item-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.recent-item-path {
+	color: var(--muted);
+	font-size: 10px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.recent-menu-empty {
+	padding: 10px 9px;
+	color: var(--muted);
+	font-size: 11px;
+	text-align: center;
+}
+.file-menu-popover button.recent-clear {
+	height: 28px;
+	justify-content: center;
+	color: var(--muted);
+}
 .menu-divider {
 	height: 1px;
 	margin: 5px 4px;
 	background: var(--line);
+}
+/* 文件树右键菜单：单个共享节点，运行时按 node kind 注入条目 */
+.tree-context-menu {
+	position: fixed;
+	z-index: 40;
+	min-width: 180px;
+	padding: 5px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--paper);
+	box-shadow: 0 14px 38px rgba(25, 22, 18, 0.18);
+}
+.tree-context-menu[hidden] {
+	display: none;
+}
+.tree-context-menu button {
+	width: 100%;
+	height: 30px;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 0 9px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	font-size: 12px;
+	text-align: left;
+	cursor: pointer;
+	white-space: nowrap;
+}
+.tree-context-menu button:hover,
+.tree-context-menu button:focus-visible {
+	background: var(--hover);
+}
+.tree-context-menu button:focus-visible {
+	outline: 1px solid var(--line);
+	outline-offset: -1px;
 }
 .primary-btn {
 	padding: 0 12px;
@@ -1588,6 +1703,7 @@ body.resizing * {
 	min-height: 0;
 	display: flex;
 	background: var(--paper);
+	position: relative;
 }
 .pane {
 	min-width: 0;
@@ -1613,6 +1729,50 @@ body.resizing * {
 	color: rgba(80, 73, 65, 0.3);
 }
 
+/* 右下角页边距调节控件 */
+.margin-control {
+	position: absolute;
+	right: 12px;
+	bottom: 12px;
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	background: rgba(246, 244, 239, 0.92);
+	box-shadow: 0 2px 8px rgba(35, 31, 26, 0.1);
+	user-select: none;
+}
+.margin-btn {
+	border: 0;
+	background: transparent;
+	border-radius: 6px;
+	width: 26px;
+	height: 26px;
+	font-size: 15px;
+	line-height: 1;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--ink);
+}
+.margin-btn:hover {
+	background: var(--hover);
+}
+.margin-btn:active {
+	background: var(--active);
+}
+.margin-value {
+	min-width: 26px;
+	text-align: center;
+	font-size: 10px;
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+}
+
 #editor {
 	width: 100%;
 	height: 100%;
@@ -1621,7 +1781,7 @@ body.resizing * {
 	outline: 0;
 	overflow: auto;
 	margin: 0;
-	padding: 56px clamp(28px, 5vw, 84px) 120px;
+	padding: 56px var(--editor-padding-x, clamp(28px, 5vw, 84px)) 120px;
 	background: var(--paper);
 	color: var(--ink);
 	font-family:
@@ -1641,7 +1801,7 @@ body.resizing * {
 .markdown-body {
 	height: 100%;
 	overflow: auto;
-	padding: 58px clamp(32px, 6vw, 92px) 140px;
+	padding: 58px var(--markdown-padding-x, clamp(32px, 6vw, 92px)) 140px;
 	color: #2f2d29;
 	font-family:
 		ui-serif, Georgia, "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC",
@@ -1802,12 +1962,18 @@ kbd {
 .shell[data-mode="editor"] .pane-handle {
 	display: none;
 }
+.shell:not([data-mode="work"]) .margin-control {
+	display: flex;
+}
+.shell[data-mode="work"] .margin-control {
+	display: none;
+}
 .shell[data-mode="editor"] .editor-pane {
 	flex-basis: 100% !important;
 }
 .shell[data-mode="editor"] #editor {
-	padding-left: clamp(48px, 13vw, 220px);
-	padding-right: clamp(48px, 13vw, 220px);
+	padding-left: var(--editor-padding-x, clamp(48px, 13vw, 220px));
+	padding-right: var(--editor-padding-x, clamp(48px, 13vw, 220px));
 }
 .shell[data-mode="reader"] .editor-pane,
 .shell[data-mode="reader"] .pane-handle {
@@ -1817,8 +1983,13 @@ kbd {
 	flex-basis: 100% !important;
 }
 .shell[data-mode="reader"] .markdown-body {
-	padding-left: clamp(48px, 14vw, 220px);
-	padding-right: clamp(48px, 14vw, 220px);
+	padding-left: var(--markdown-padding-x, clamp(48px, 14vw, 220px));
+	padding-right: var(--markdown-padding-x, clamp(48px, 14vw, 220px));
+}
+/* 用户设过固定页边距后，单栏读模式放开 760px 居中版心：
+   文字宽度 = 窗宽 − 2×边距，任何数值都立即可见；auto 保持居中阅读版心。 */
+body.margin-fixed .shell[data-mode="reader"] .markdown-body > * {
+	max-width: none;
 }
 
 .modal {

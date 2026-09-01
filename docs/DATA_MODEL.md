@@ -18,6 +18,7 @@
 | Memory | SQLite durable |
 | Source registrations | SQLite durable |
 | FTS / trigram | SQLite derived/rebuildable |
+| Recent 打开列表（recent_locations） | SQLite durable，machine-local shell 导航状态（见 §2.2） |
 | layout/theme/width | localStorage presentation only |
 | Pi raw session/trace | Pi/runtime evidence |
 | Product evolution | Git |
@@ -232,6 +233,30 @@ Work 语义事件只有三个动作：`work.created` / `work.status_changed` / `
 ### work_relations
 
 Can initially use generic `relations` rather than a separate table unless query patterns require specialization.
+
+### recent_locations（v5，machine-local 例外）
+
+`recent_locations` 是 durable `state.db` 里唯一的 **machine-local shell 导航状态**（“最近打开”）。它是一条刻意的边界例外，不要把它当 Entity 使用：
+
+```text
+id
+kind        workspace | document
+path        本机绝对路径（重新打开所必需）
+opened_at
+UNIQUE(kind, path)
+```
+
+记录时机：仅在用户显式打开动作后 upsert（`choose_workspace` / `choose_document` / `open_recent_workspace` / `open_recent_document` / Save As），保留最近 30 条，UI 只显示前 12 条。
+
+它**不**：
+
+- 转换成 canonical object URI（绝对路径不进 `workspace://` 语义图）
+- 进入 Relation / Anchor / Context / Memory / Work
+- 暴露给 Runtime Agent
+- append semantic event（不是 semantic observability）
+- 进入 Workspace Markdown / git，或跨机器同步
+
+`available` 每次 list 时通过 filesystem metadata 现算，不落库；路径不可用时菜单项禁用但不自动删除。
 
 ### memories
 

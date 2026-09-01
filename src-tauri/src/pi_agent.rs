@@ -575,6 +575,20 @@ impl PiProcessState {
         self.current_process()?.active_run().map(|run| run.run_id)
     }
 
+    /// 关闭当前 Pi 进程，无论它属于哪个 Workspace。若进程上有进行中的 run，
+    /// 返回其 run id（调用方负责把对应 Work 转为 cancelled）。
+    /// Close Workspace 用它显式解除 active root，不构造 fake root 欺骗
+    /// [`Self::shutdown_for_workspace`]。
+    pub fn shutdown_current(&self) -> Option<String> {
+        let old = self
+            .store
+            .runtime
+            .lock()
+            .ok()
+            .and_then(|mut runtime| runtime.take());
+        Self::shutdown_runtime(old)
+    }
+
     /// 关闭属于其它 Workspace 的 Pi 进程。若进程上有进行中的 run，
     /// 返回其 run id（调用方负责把对应 Work 转为 cancelled）。
     pub fn shutdown_for_workspace(&self, next_root: &Path) -> Option<String> {
@@ -589,6 +603,10 @@ impl PiProcessState {
                 None
             }
         });
+        Self::shutdown_runtime(old)
+    }
+
+    fn shutdown_runtime(old: Option<Runtime>) -> Option<String> {
         let aborted_run = old
             .as_ref()
             .and_then(|runtime| runtime.process.active_run().map(|run| run.run_id));

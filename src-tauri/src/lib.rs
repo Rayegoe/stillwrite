@@ -19,7 +19,7 @@ pub mod state_store;
 mod sync;
 pub mod work;
 
-use state_store::ObjectUri;
+use state_store::{ObjectUri, RecentLocationKind};
 
 #[derive(Default)]
 struct AppState {
@@ -273,7 +273,12 @@ fn scan_dir(path: &Path) -> Result<Vec<TreeNode>, String> {
             let Ok(children) = scan_dir(&path) else {
                 continue;
             };
-            if !children.is_empty() {
+            // 目录可见性：有 Markdown 后代，或者真正为空（刚新建的空文件夹必须立即可见）。
+            // “只含非 Markdown 文件”的目录（如 assets/）继续隐藏。
+            let truly_empty = fs::read_dir(&path)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if !children.is_empty() || truly_empty {
                 dirs.push(TreeNode {
                     name,
                     path: path.to_string_lossy().to_string(),
@@ -404,6 +409,19 @@ fn workspace_root(state: &State<AppState>) -> Result<PathBuf, String> {
         .ok_or_else(|| "尚未打开工作区".to_string())
 }
 
+/// 记录“最近打开”。这是 machine-local shell 导航状态（state.db v5）：
+/// 只在用户显式打开动作后调用，best-effort 失败不打断打开本身，
+/// 也不 append semantic event。
+fn record_recent_location(app: &AppHandle, kind: RecentLocationKind, path: &Path) {
+    let result = (|| -> Result<(), String> {
+        let mut conn = open_durable_state(app)?;
+        state_store::record_recent_location(&mut conn, kind, &path.to_string_lossy())
+    })();
+    if let Err(error) = result {
+        eprintln!("记录最近打开失败: {error}");
+    }
+}
+
 fn ensure_existing_path_inside_workspace(
     path: &str,
     state: &State<AppState>,
@@ -434,7 +452,46 @@ async fn choose_workspace(
     let path = selected
         .into_path()
         .map_err(|e| format!("目录路径不可用: {e}"))?;
-    activate_workspace(path, &app, &state, &process).map(Some)
+    let data = activate_workspace(path, &app, &state, &process)?;
+    record_recent_location(&app, RecentLocationKind::Workspace, Path::new(&data.root));
+    Ok(Some(data))
+}
+
+/// picker（choose_document）与 recent（open_recent_document）共用的打开语义：
+/// canonicalize → 校验 Markdown → 解析 root（文件已在工作区内则沿用，否则父目录
+/// 成为 Workspace）→ activate_workspace → 读取正文 → 记录 document recent。
+/// 不在这里记录 parent workspace：一次打开动作只产生一条 recent。
+fn open_document_path(
+    path: PathBuf,
+    app: &AppHandle,
+    state: &State<AppState>,
+    process: &pi_agent::PiProcessState,
+) -> Result<OpenDocumentData, String> {
+    let path = fs::canonicalize(path).map_err(|e| format!("打开文档失败: {e}"))?;
+    if !path.is_file() || !is_markdown(&path) {
+        return Err("请选择 .md 或 .markdown 文档".into());
+    }
+
+    let root = workspace_root(state)
+        .ok()
+        .filter(|root| path.starts_with(root))
+        .or_else(|| path.parent().map(Path::to_path_buf))
+        .ok_or_else(|| "无法确定文档所在文件夹".to_string())?;
+    let WorkspaceData { root, nodes } = activate_workspace(root, app, state, process)?;
+    let content = fs::read_to_string(&path).map_err(|e| format!("读取文档失败: {e}"))?;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Markdown".to_string());
+    record_recent_location(app, RecentLocationKind::Document, &path);
+
+    Ok(OpenDocumentData {
+        root,
+        nodes,
+        path: path.to_string_lossy().to_string(),
+        name,
+        content,
+    })
 }
 
 #[tauri::command]
@@ -456,30 +513,52 @@ async fn choose_document(
     let path = selected
         .into_path()
         .map_err(|e| format!("文档路径不可用: {e}"))?;
-    let path = fs::canonicalize(path).map_err(|e| format!("打开文档失败: {e}"))?;
-    if !path.is_file() || !is_markdown(&path) {
-        return Err("请选择 .md 或 .markdown 文档".into());
+    open_document_path(path, &app, &state, &process).map(Some)
+}
+
+#[tauri::command]
+async fn open_recent_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    process: State<'_, pi_agent::PiProcessState>,
+    path: String,
+) -> Result<WorkspaceData, String> {
+    let path = PathBuf::from(path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("最近工作区路径为空".into());
     }
+    let data = activate_workspace(path, &app, &state, &process)?;
+    record_recent_location(&app, RecentLocationKind::Workspace, Path::new(&data.root));
+    Ok(data)
+}
 
-    let root = workspace_root(&state)
-        .ok()
-        .filter(|root| path.starts_with(root))
-        .or_else(|| path.parent().map(Path::to_path_buf))
-        .ok_or_else(|| "无法确定文档所在文件夹".to_string())?;
-    let WorkspaceData { root, nodes } = activate_workspace(root, &app, &state, &process)?;
-    let content = fs::read_to_string(&path).map_err(|e| format!("读取文档失败: {e}"))?;
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Markdown".to_string());
+#[tauri::command]
+async fn open_recent_document(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    process: State<'_, pi_agent::PiProcessState>,
+    path: String,
+) -> Result<OpenDocumentData, String> {
+    let path = PathBuf::from(path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("最近文档路径为空".into());
+    }
+    open_document_path(path, &app, &state, &process)
+}
 
-    Ok(Some(OpenDocumentData {
-        root,
-        nodes,
-        path: path.to_string_lossy().to_string(),
-        name,
-        content,
-    }))
+#[tauri::command]
+async fn list_recent_locations(
+    app: AppHandle,
+) -> Result<Vec<state_store::RecentLocationView>, String> {
+    let conn = open_durable_state(&app)?;
+    // 数据库本身只保留最近 30 条，这里全部返回给 UI（UI 只显示前 12 条）
+    state_store::list_recent_locations(&conn, 30)
+}
+
+#[tauri::command]
+async fn clear_recent_locations(app: AppHandle) -> Result<(), String> {
+    let mut conn = open_durable_state(&app)?;
+    state_store::clear_recent_locations(&mut conn).map(|_| ())
 }
 
 #[tauri::command]
@@ -644,6 +723,201 @@ async fn create_markdown(
         indexer::index_single(conn, root, &target)
     });
     Ok(target.to_string_lossy().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// File / Workspace lifecycle：另存为、关闭工作区、reveal、新建文件夹。
+// 这些是 application shell 动作：不 append semantic event，不进入 URI 语义图。
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedAsDocument {
+    path: String,
+    name: String,
+    root: String,
+    nodes: Vec<TreeNode>,
+}
+
+/// Workspace Markdown 另存为：目标必须仍在当前工作区内，目标已存在时拒绝
+/// （不静默覆盖），原文件保留，新文件成为 current document 并记录 document recent。
+#[tauri::command]
+async fn save_markdown_as(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    current_path: String,
+    content: String,
+) -> Result<Option<SavedAsDocument>, String> {
+    let root = workspace_root(&state)?;
+    let current = ensure_existing_path_inside_workspace(&current_path, &state)?;
+    if !is_markdown(&current) {
+        return Err("另存为只支持 Workspace Markdown 文档".into());
+    }
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Markdown 另存为")
+        .add_filter("Markdown", &["md", "markdown"])
+        .set_directory(current.parent().unwrap_or(&root))
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let mut target = selected
+        .into_path()
+        .map_err(|e| format!("目标路径不可用: {e}"))?;
+    // 没写扩展名时按 Markdown 过滤器补 .md；写了其它扩展名则拒绝
+    if !is_markdown(&target) {
+        if target.extension().is_none() {
+            target.set_extension("md");
+        } else {
+            return Err("另存为目标必须使用 .md 或 .markdown 扩展名".into());
+        }
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| "目标路径无效".to_string())?
+        .to_path_buf();
+    let parent = fs::canonicalize(&parent).map_err(|e| format!("目标文件夹不可用: {e}"))?;
+    if !parent.starts_with(&root) {
+        return Err("另存为目标必须仍在当前工作区内".into());
+    }
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| "目标路径无效".to_string())?
+        .to_string_lossy()
+        .to_string();
+    let target = parent.join(&file_name);
+    // symlink_metadata：以任何形式存在（含悬空/外部符号链接）都拒绝
+    if target.symlink_metadata().is_ok() {
+        return Err("目标文件已存在，请另选名称".into());
+    }
+    if !is_markdown(&target) {
+        return Err("另存为目标必须使用 .md 或 .markdown 扩展名".into());
+    }
+    atomic_write(&target, &content)?;
+    let _ = with_index(&app, &state, |conn, root| {
+        indexer::index_single(conn, root, &target)
+    });
+    record_recent_location(&app, RecentLocationKind::Document, &target);
+    let nodes = scan_dir(&root)?;
+    Ok(Some(SavedAsDocument {
+        path: target.to_string_lossy().to_string(),
+        name: file_name,
+        root: root.to_string_lossy().to_string(),
+        nodes,
+    }))
+}
+
+/// 显式关闭工作区：先关闭当前 Pi 进程（把进行中的 run 对应 Work 落为
+/// cancelled），再解除 active root。不删除任何 Markdown / 批注 / durable 状态。
+#[tauri::command]
+async fn close_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    process: State<'_, pi_agent::PiProcessState>,
+) -> Result<(), String> {
+    {
+        let guard = state
+            .root
+            .lock()
+            .map_err(|_| "工作区状态锁定失败".to_string())?;
+        if guard.is_none() {
+            return Ok(());
+        }
+    }
+    // shutdown 会等待 abort 响应，放到阻塞线程避免卡住 async runtime
+    let process_for_shutdown = process.inner().clone();
+    let app_for_shutdown = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(run_id) = process_for_shutdown.shutdown_current() {
+            pi_agent::cancel_run_work(&app_for_shutdown, &run_id, "关闭工作区，运行被中止");
+        }
+    })
+    .await
+    .map_err(|e| format!("关闭工作区任务异常: {e}"))?;
+    *state
+        .root
+        .lock()
+        .map_err(|_| "工作区状态锁定失败".to_string())? = None;
+    *state
+        .index_db
+        .lock()
+        .map_err(|_| "工作区状态锁定失败".to_string())? = None;
+    Ok(())
+}
+
+/// 在文件管理器中显示 Workspace 内的路径。root 本身直接打开；
+/// 子路径用 opener 插件的 reveal（在父目录中选中该条目）。
+#[tauri::command]
+fn reveal_workspace_path(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    let root = workspace_root(&state)?;
+    if path.trim().is_empty() {
+        return Err("路径为空".into());
+    }
+    let canonical = fs::canonicalize(&path).map_err(|e| format!("路径不可用: {e}"))?;
+    if !canonical.starts_with(&root) {
+        return Err("拒绝访问工作区以外的路径".into());
+    }
+    use tauri_plugin_opener::OpenerExt;
+    let result = if canonical == root {
+        // root 的 parent 不属于 Workspace，直接打开 root 本身
+        app.opener()
+            .open_path(canonical.to_string_lossy(), None::<&str>)
+    } else {
+        app.opener().reveal_item_in_dir(&canonical)
+    };
+    result.map_err(|e| format!("在文件管理器中显示失败: {e}"))
+}
+
+/// 新建文件夹名字必须是单一 normal path component：拒绝空、`.`、`..`、
+/// 分隔符、绝对路径与 Windows 前缀；`.` 开头的隐藏名会被文件树跳过、
+/// 用户看不见，也一并拒绝。
+fn validate_workspace_folder_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("文件夹名不能为空".into());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("文件夹名不能包含路径分隔符".into());
+    }
+    if name.starts_with('.') {
+        return Err("隐藏文件夹不会显示在文件树中，请换一个名字".into());
+    }
+    let components: Vec<Component> = Path::new(name).components().collect();
+    if !matches!(components.as_slice(), [Component::Normal(_)]) {
+        return Err("文件夹名包含不允许的路径".into());
+    }
+    Ok(())
+}
+
+/// 在 Workspace 内新建空文件夹（parent 必须在当前工作区内，名称为单一组件，
+/// 目标已存在/符号链接一律拒绝）。返回 canonical 目标路径。
+#[tauri::command]
+async fn create_workspace_folder(
+    parent_path: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let root = workspace_root(&state)?;
+    validate_workspace_folder_name(&name)?;
+    let parent = fs::canonicalize(&parent_path).map_err(|e| format!("目标文件夹不可用: {e}"))?;
+    if !parent.starts_with(&root) {
+        return Err("拒绝访问工作区以外的路径".into());
+    }
+    if !parent.is_dir() {
+        return Err("父路径不是文件夹".into());
+    }
+    let target = parent.join(&name);
+    if target.symlink_metadata().is_ok() {
+        return Err("同名文件或文件夹已存在".into());
+    }
+    fs::create_dir(&target).map_err(|e| format!("创建文件夹失败: {e}"))?;
+    let canonical = fs::canonicalize(&target).map_err(|e| format!("解析新文件夹失败: {e}"))?;
+    Ok(canonical.to_string_lossy().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1753,10 +2027,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             choose_workspace,
             choose_document,
+            open_recent_workspace,
+            open_recent_document,
+            list_recent_locations,
+            clear_recent_locations,
             set_workspace,
             read_markdown,
             write_markdown,
             create_markdown,
+            save_markdown_as,
+            create_workspace_folder,
+            reveal_workspace_path,
+            close_workspace,
             import_workspace_image,
             read_workspace_image_data_url,
             rebuild_index,
@@ -1890,6 +2172,68 @@ mod tests {
         let nodes = scan_dir(&root).unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].name, "visible.md");
+    }
+
+    // ---- scan_dir 目录可见性（Markdown 后代 OR 真空） ----
+
+    #[test]
+    fn scan_dir_shows_truly_empty_directories() {
+        let root = temp_dir("scan-empty");
+        fs::write(root.join("note.md"), "note").unwrap();
+        fs::create_dir_all(root.join("fresh-notes")).unwrap();
+
+        let nodes = scan_dir(&root).unwrap();
+        let names: Vec<_> = nodes.iter().map(|node| node.name.as_str()).collect();
+        assert_eq!(names, vec!["fresh-notes", "note.md"]);
+        assert!(nodes[0].is_dir);
+        assert!(nodes[0].children.is_empty());
+    }
+
+    #[test]
+    fn scan_dir_hides_directories_with_only_non_markdown_files() {
+        let root = temp_dir("scan-assets");
+        fs::write(root.join("note.md"), "note").unwrap();
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(root.join("assets").join("pic.png"), b"\x89PNG").unwrap();
+
+        let nodes = scan_dir(&root).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "note.md");
+    }
+
+    #[test]
+    fn scan_dir_hides_directories_containing_only_hidden_files() {
+        let root = temp_dir("scan-hidden-only");
+        fs::write(root.join("note.md"), "note").unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git").join("config"), "[core]").unwrap();
+
+        let nodes = scan_dir(&root).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "note.md");
+    }
+
+    // ---- validate_workspace_folder_name ----
+
+    #[test]
+    fn folder_name_validation_accepts_single_component() {
+        assert!(validate_workspace_folder_name("notes").is_ok());
+        assert!(validate_workspace_folder_name("我的 文献").is_ok());
+        assert!(validate_workspace_folder_name("v0.1").is_ok());
+    }
+
+    #[test]
+    fn folder_name_validation_rejects_bad_names() {
+        assert!(validate_workspace_folder_name("").is_err());
+        assert!(validate_workspace_folder_name("   ").is_err());
+        assert!(validate_workspace_folder_name(".").is_err());
+        assert!(validate_workspace_folder_name("..").is_err());
+        assert!(validate_workspace_folder_name("a/b").is_err());
+        assert!(validate_workspace_folder_name("a\\b").is_err());
+        assert!(validate_workspace_folder_name("/abs").is_err());
+        assert!(validate_workspace_folder_name("C:\\tmp").is_err());
+        assert!(validate_workspace_folder_name("a/../b").is_err());
+        assert!(validate_workspace_folder_name(".hidden").is_err());
     }
 
     // ---- create_dir_all_inside ----

@@ -71,12 +71,29 @@ const clearWorksetButton = document.querySelector("#clearWorkset");
 const fileMenuRoot = document.querySelector("#fileMenuRoot");
 const fileMenuButton = document.querySelector("#fileMenuButton");
 const fileMenu = document.querySelector("#fileMenu");
+const newFileItem = document.querySelector("#newFile");
+const openFolderItem = document.querySelector("#openFolder");
+const openDocumentItem = document.querySelector("#openDocument");
+const saveDocumentItem = document.querySelector("#saveDocument");
+const saveDocumentAsItem = document.querySelector("#saveDocumentAs");
+const recentMenuTrigger = document.querySelector("#recentMenuTrigger");
+const recentMenu = document.querySelector("#recentMenu");
+const workspaceMenuTrigger = document.querySelector("#workspaceMenuTrigger");
+const workspaceMenu = document.querySelector("#workspaceMenu");
+const workspaceRevealItem = document.querySelector("#workspaceReveal");
+const workspaceRefreshItem = document.querySelector("#workspaceRefresh");
+const workspaceAggregateItem = document.querySelector("#workspaceAggregate");
+const workspaceCloseItem = document.querySelector("#workspaceClose");
+const treeContextMenu = document.querySelector("#treeContextMenu");
+const newFolderDialog = document.querySelector("#newFolderDialog");
+const newFolderForm = document.querySelector("#newFolderForm");
+const newFolderName = document.querySelector("#newFolderName");
+const cancelNewFolderButton = document.querySelector("#cancelNewFolder");
 const annotationButton = document.querySelector("#annotationButton");
 const annotatePanel = document.querySelector("#annotatePanel");
 const annotateHandle = document.querySelector("#annotateHandle");
 const closeAnnotate = document.querySelector("#closeAnnotate");
 const aggregateButton = document.querySelector("#aggregateButton");
-const aggregateMenu = document.querySelector("#aggregateMenu");
 const annotateDocName = document.querySelector("#annotateDocName");
 const annotateDocPath = document.querySelector("#annotateDocPath");
 const annotateCount = document.querySelector("#annotateCount");
@@ -1918,6 +1935,38 @@ function clearLocalImagePreviewCache() {
 	localImagePreviewCache.clear();
 }
 
+/// 恢复欢迎页（updatePreview 会 replaceChildren，无法直接保留初始 DOM）。
+function showWelcomePreview() {
+	previewEl.replaceChildren();
+	const welcome = document.createElement("div");
+	welcome.className = "welcome";
+	const title = document.createElement("h1");
+	title.textContent = "Stillwrite";
+	const hint = document.createElement("p");
+	hint.textContent = "从“文件”菜单打开文件夹或 Markdown 文档开始写作。";
+	const keys = document.createElement("p");
+	const kbd1 = document.createElement("kbd");
+	kbd1.textContent = "Ctrl+1";
+	const kbd2 = document.createElement("kbd");
+	kbd2.textContent = "Ctrl+2";
+	const kbd3 = document.createElement("kbd");
+	kbd3.textContent = "Ctrl+3";
+	keys.append(kbd1, " 写作 · ", kbd2, " 双栏 · ", kbd3, " 阅读");
+	welcome.append(title, hint, keys);
+	previewEl.appendChild(welcome);
+}
+
+/// 提取 Tauri 命令错误里人可读的部分；extract 失败时退回 fallback。
+function backendErrorMessage(error, fallback) {
+	const text = String(error ?? "").replace(
+		/^Error invoking remote method '[^']+': Error: /,
+		"",
+	);
+	const trimmed = text.trim();
+	if (!trimmed) return fallback;
+	return trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed;
+}
+
 function updatePreview() {
 	if (previewTimer) {
 		clearTimeout(previewTimer);
@@ -1927,7 +1976,9 @@ function updatePreview() {
 	preparePreviewLinks(doc.body);
 	previewEl.replaceChildren(...doc.body.childNodes);
 	renderAnnotationAnchors();
-	void hydrateLocalPreviewImages(doc.body);
+	// 注意：节点已被 replaceChildren 移进 previewEl，必须对 previewEl 水合
+	// （doc.body 此刻已为空，传它会导致本地图片永远拿不到 data URL）。
+	void hydrateLocalPreviewImages(previewEl);
 }
 
 function schedulePreview() {
@@ -2503,19 +2554,24 @@ async function chooseWorkspace() {
 		if (annotateDirty) await saveAnnotate();
 		const data = await invoke("choose_workspace");
 		if (!data) return;
-		currentFile = null;
-		currentAgentDocument = null;
-		editor.value = "";
-		updatePreview();
-		documentTitleEl.textContent = "Stillwrite";
-		await setSidebarMode("workspace");
-		await useWorkspace(data);
-		loadAnnotationPanel();
-		updateFormatToolbarState();
+		await openWorkspaceData(data);
 	} catch (error) {
 		console.error(error);
 		markError("目录打开失败");
 	}
+}
+
+/// choose_workspace 与 open_recent_workspace 共用的 Workspace 打开投影。
+async function openWorkspaceData(data) {
+	currentFile = null;
+	currentAgentDocument = null;
+	editor.value = "";
+	updatePreview();
+	documentTitleEl.textContent = "Stillwrite";
+	await setSidebarMode("workspace");
+	await useWorkspace(data);
+	loadAnnotationPanel();
+	updateFormatToolbarState();
 }
 
 async function chooseDocument() {
@@ -2564,13 +2620,145 @@ async function refreshTree() {
 		}
 		return;
 	}
+	await refreshWorkspace();
+}
+
+/// 工作区子菜单的「刷新工作区」：显式刷新 Workspace 投影，不复用 mode-aware
+/// 的 refreshTree。same root 时 backend 不视为切换（不取消 Pi、不清缓存）；
+/// 不强制切左栏，不关当前 Library / Work projection，不丢当前文档 buffer。
+async function refreshWorkspace() {
 	if (!rootPath) return;
 	try {
+		if (!libraryMode && !workMode) {
+			await saveCurrent();
+			if (annotateDirty && currentFile) await saveAnnotate();
+		}
 		const data = await invoke("set_workspace", { path: rootPath });
-		await useWorkspace(data);
+		if (libraryMode || workMode) {
+			// 只更新文件树缓存与链接索引，不打断当前资料/工作 projection
+			rootPath = data.root;
+			lastTreeNodes = data.nodes;
+			documentLinkIndex = DocumentLinks.buildIndex(data.nodes, rootPath);
+			workspaceNameEl.textContent = basename(rootPath);
+			workspaceNameEl.title = rootPath;
+		} else {
+			await useWorkspace(data);
+			if (currentFile && !workspacePathExists(currentFile)) {
+				// 当前文档被外部删除：清理 current doc 并提示
+				currentFile = null;
+				editor.value = "";
+				showWelcomePreview();
+				documentTitleEl.textContent = "Stillwrite";
+				markError("当前文档已被外部删除");
+				loadAnnotationPanel();
+				updateFormatToolbarState();
+			}
+		}
 	} catch (error) {
 		console.error(error);
-		markError("刷新失败");
+		markError("刷新工作区失败");
+	}
+}
+
+/// 关闭工作区：前端先落盘可编辑内容与待保存批注、中止进行中的 Agent run，
+/// 再调用真实 backend lifecycle（关闭 Pi、解除 active root），最后清 UI shell 状态。
+/// 不删除任何 Markdown / 批注 / durable 状态。
+async function closeWorkspace() {
+	if (!rootPath) return;
+	try {
+		if (agentBusy) await cancelAgentTurn();
+		await saveCurrent();
+		if (annotateDirty) await saveAnnotate();
+		await invoke("close_workspace");
+
+		// ---- UI reset：backend 已解除 active root，这里只投影 ----
+		rootPath = null;
+		localStorage.removeItem("stillwrite.rootPath");
+		currentFile = null;
+		currentAgentDocument = null;
+		currentLibraryDocument = null;
+		lastTreeNodes = [];
+		documentLinkIndex = DocumentLinks.buildIndex([], null);
+		editor.value = "";
+		editor.readOnly = false;
+		editor.classList.remove("readonly");
+		editorPaneLabel.textContent = "WRITE";
+		annotationButton.disabled = false;
+		aggregateButton.disabled = true;
+		showWelcomePreview();
+		documentTitleEl.textContent = "Stillwrite";
+		workspaceNameEl.textContent = "未打开文件夹";
+		workspaceNameEl.title = "";
+		markSaved();
+		// 运行时投影清空（durable 的 works / recents / relations 不动）
+		agentWorkItems = [];
+		localAgentRuns = [];
+		activeAgentRunId = null;
+		agentProbed = false;
+		historicAgentFailures = [];
+		workItems = [];
+		currentWork = null;
+		renderAgentWorks();
+		renderWorkList();
+		renderWorkCenter();
+		citationBasket.clear();
+		renderCitationSummary();
+		clearRelated();
+		clearWebSearch({ clearHistory: true });
+		clearLocalImagePreviewCache();
+		loadAnnotationPanel();
+		// 左栏切到 文件 projection，显示空状态而不是空 Work Home
+		await setSidebarMode("workspace");
+		treeEl.replaceChildren();
+		const tip = document.createElement("div");
+		tip.className = "empty-tip";
+		tip.textContent = "打开文件夹或 Markdown 开始";
+		treeEl.appendChild(tip);
+		updateFormatToolbarState();
+		updateFileMenuState();
+	} catch (error) {
+		console.error(error);
+		markError(backendErrorMessage(error, "关闭工作区失败"));
+	}
+}
+
+/// 在文件管理器中显示 Workspace root 或其中某个路径（backend 校验边界）。
+async function revealPath(path) {
+	try {
+		await invoke("reveal_workspace_path", { path });
+	} catch (error) {
+		console.error(error);
+		markError(backendErrorMessage(error, "显示失败"));
+	}
+}
+
+/// Workspace Markdown 另存为：backend 负责对话框 / 边界校验 / 原子写入；
+/// 成功后 currentFile 切到新文件，原文件保留，新文档不继承批注 sidecar。
+async function saveDocumentAs() {
+	if (!currentFile || currentLibraryDocument || currentAgentDocument) return;
+	try {
+		// 先落盘旧文档的待保存批注：另存后批注上下文会切到新文档
+		if (annotateDirty) await saveAnnotate();
+		const data = await invoke("save_markdown_as", {
+			currentPath: currentFile,
+			content: editor.value,
+		});
+		if (!data) return; // 用户取消
+		currentFile = data.path;
+		currentLibraryDocument = null;
+		currentAgentDocument = null;
+		lastTreeNodes = data.nodes;
+		documentLinkIndex = DocumentLinks.buildIndex(data.nodes, data.root);
+		renderTree(data.nodes);
+		documentTitleEl.textContent = data.name.replace(/\.(md|markdown)$/i, "");
+		markSaved();
+		loadAnnotationPanel();
+		scheduleRelatedRefresh(0);
+		void loadWebSearchHistory();
+		updateFormatToolbarState();
+	} catch (error) {
+		console.error(error);
+		markError(backendErrorMessage(error, "另存为失败"));
 	}
 }
 
@@ -4288,13 +4476,9 @@ function samePath(a, b) {
 
 async function doAggregateAnnotations() {
 	if (!rootPath) return;
-	if (currentLibraryDocument || currentAgentDocument) {
-		annotateFoot.textContent = currentLibraryDocument
-			? "资料批注不写入 Workspace 汇总"
-			: "Agent 批注不写入 Workspace 汇总";
-		return;
-	}
-	// 先落盘待保存的批注：刚打完字就点汇总时，650ms 防抖可能还没触发
+	// Workspace 汇总只聚合 Workspace 批注 sidecar：无论当前 surface 是
+	// Work / Library / Agent 都可以执行。先落盘当前 Workspace 文档的待保存
+	// 批注（刚打完字就点汇总时，650ms 防抖可能还没触发）。
 	if (currentFile && isAnnotatablePath(currentFile) && annotateDirty)
 		await saveAnnotate();
 	aggregateButton.disabled = true;
@@ -4401,6 +4585,8 @@ function updateFormatToolbarState() {
 	// comment 始终可用（复用现有 Annotation 流程）
 	const commentBtn = formatButtons.get("comment");
 	if (commentBtn) commentBtn.disabled = false;
+	// File menu 的启用矩阵与文档/工作区状态同步刷新
+	updateFileMenuState();
 }
 
 function textareaSelection() {
@@ -4536,6 +4722,69 @@ document.addEventListener("pointerdown", (event) => {
 		closeHeadingMenu();
 	}
 });
+
+// ---------------------------------------------------------------------------
+// 页边距调节：右下角悬浮 − / ＋ 控件（写 / 双栏 / 读三种模式均可用）。
+// 写模式调编辑区（#editor），读/双栏模式调阅读区（.markdown-body）。
+// 纯展示偏好（AGENTS.md 2.1 允许 localStorage），不进入任何 durable state。
+// 默认不设置变量时维持原有 clamp(...) 响应式行为；设置后固定像素。
+// 注意：阅读区内容列默认 max-width: 760px 居中，页边距超过 (窗宽 − 760) / 2
+// 才会推动文字；因此用户设过固定值后，单栏读模式放开版心（CSS: body.margin-
+// fixed），让任何数值立即可见——760px 版心只属于 auto，不纳入按键管理。
+// ---------------------------------------------------------------------------
+
+const MARGIN_STORAGE_KEY = "stillwrite.markdownPaddingX";
+const MARGIN_MIN = 16;
+const MARGIN_MAX = 480;
+const MARGIN_STEP = 8;
+// 从 auto 首次点击的起步值：取写/双栏 clamp 在常见窗宽下的典型生效量，
+// 保证首击方向与按钮语义一致（− 变窄、＋ 变宽），而不是从极值跳变。
+const MARGIN_AUTO_SEED = 72;
+let markdownPaddingX = parseInt(
+	localStorage.getItem(MARGIN_STORAGE_KEY),
+	10,
+);
+if (Number.isNaN(markdownPaddingX)) markdownPaddingX = null;
+
+const marginControl = document.querySelector("#marginControl");
+const marginNarrowBtn = document.querySelector("#marginNarrow");
+const marginWideBtn = document.querySelector("#marginWide");
+const marginValueEl = document.querySelector("#marginValue");
+
+function applyMarkdownPadding() {
+	const rootStyle = document.documentElement.style;
+	// margin-fixed：用户设过固定值。读单模式据此放开 760px 居中版心，
+	// 让任何边距数值都立即可见；auto（null）保持居中阅读版心。
+	if (markdownPaddingX === null) {
+		rootStyle.removeProperty("--markdown-padding-x");
+		rootStyle.removeProperty("--editor-padding-x");
+		document.body.classList.remove("margin-fixed");
+		marginValueEl.textContent = "auto";
+	} else {
+		rootStyle.setProperty("--markdown-padding-x", `${markdownPaddingX}px`);
+		rootStyle.setProperty("--editor-padding-x", `${markdownPaddingX}px`);
+		document.body.classList.add("margin-fixed");
+		marginValueEl.textContent = String(markdownPaddingX);
+	}
+}
+
+function setMarkdownPaddingX(value) {
+	markdownPaddingX = Math.max(MARGIN_MIN, Math.min(MARGIN_MAX, value));
+	localStorage.setItem(MARGIN_STORAGE_KEY, String(markdownPaddingX));
+	applyMarkdownPadding();
+}
+
+marginNarrowBtn.addEventListener("click", () => {
+	setMarkdownPaddingX(
+		Math.max(MARGIN_MIN, (markdownPaddingX ?? MARGIN_AUTO_SEED) - MARGIN_STEP),
+	);
+});
+marginWideBtn.addEventListener("click", () => {
+	setMarkdownPaddingX(
+		Math.min(MARGIN_MAX, (markdownPaddingX ?? MARGIN_AUTO_SEED) + MARGIN_STEP),
+	);
+});
+applyMarkdownPadding();
 
 
 function clearWebSearch({ resetView = true, clearHistory = false } = {}) {
@@ -4902,6 +5151,18 @@ function treeNodeElement(node, depth, forceExpanded = false) {
 			if (!collapsed) renderChildren();
 			chevron.textContent = collapsed ? "›" : "⌄";
 		});
+		button.addEventListener("contextmenu", (event) => {
+			event.preventDefault();
+			openTreeContextMenu(
+				{
+					kind: node.path === rootPath ? "root" : "directory",
+					path: node.path,
+					name: node.name,
+				},
+				event.clientX,
+				event.clientY,
+			);
+		});
 		wrap.append(button, children);
 		return wrap;
 	}
@@ -4915,6 +5176,14 @@ function treeNodeElement(node, depth, forceExpanded = false) {
 	button.addEventListener("click", () =>
 		openFile(node.path, node.name, button),
 	);
+	button.addEventListener("contextmenu", (event) => {
+		event.preventDefault();
+		openTreeContextMenu(
+			{ kind: "markdown", path: node.path, name: node.name },
+			event.clientX,
+			event.clientY,
+		);
+	});
 	return button;
 }
 
@@ -5007,9 +5276,296 @@ function bindResize(handle, getStart, onMove, onEnd) {
 	});
 }
 
+// ---------------------------------------------------------------------------
+// 文件菜单（File / Recent / Workspace 子菜单）与文件树右键菜单。
+// 菜单不持有业务状态：只投影 rootPath / currentFile / recentLocations，
+// 启用矩阵等纯逻辑在 file-menu.js（StillwriteFileMenu）。
+// ---------------------------------------------------------------------------
+
+const FileMenuHelpers = window.StillwriteFileMenu;
+let recentLocations = [];
+let submenuHoverCloseTimer = null;
+let pendingNewFolderParent = null;
+
+function fileMenuContext() {
+	return {
+		hasWorkspace: Boolean(rootPath),
+		currentFile,
+		libraryDoc: currentLibraryDocument,
+		agentDoc: currentAgentDocument,
+	};
+}
+
+/// DOM 投影当前菜单启用矩阵；在每个文档/工作区状态变化点被
+/// updateFormatToolbarState 带动刷新，打开菜单时也会再刷一次。
+function updateFileMenuState() {
+	const state = FileMenuHelpers.menuState(fileMenuContext());
+	newFileItem.disabled = !state.newFile;
+	openFolderItem.disabled = !state.open;
+	openDocumentItem.disabled = !state.open;
+	recentMenuTrigger.disabled = !state.recent;
+	saveDocumentItem.disabled = !state.save;
+	saveDocumentAsItem.disabled = !state.saveAs;
+	workspaceMenuTrigger.disabled = !state.workspace;
+	if (state.workspace === false) setFileMenuSubmenuOpen(workspaceMenuTrigger, workspaceMenu, false);
+}
+
 function setFileMenuOpen(open) {
+	if (!open) {
+		closeFileMenuSubmenus();
+	} else {
+		updateFileMenuState();
+		renderRecentMenu(); // 先按缓存投影，异步刷新后再重绘
+		void loadRecentLocations();
+	}
 	fileMenu.hidden = !open;
 	fileMenuButton.setAttribute("aria-expanded", String(open));
+	if (open) {
+		const items = visibleEnabledMenuItems(fileMenu);
+		items[0]?.focus();
+	}
+}
+
+function anyFileSubmenuOpen() {
+	return !recentMenu.hidden || !workspaceMenu.hidden;
+}
+
+function closeFileMenuSubmenus() {
+	setFileMenuSubmenuOpen(recentMenuTrigger, recentMenu, false);
+	setFileMenuSubmenuOpen(workspaceMenuTrigger, workspaceMenu, false);
+}
+
+function setFileMenuSubmenuOpen(trigger, menu, open) {
+	if (open) {
+		if (trigger.disabled) return;
+		closeFileMenuSubmenus();
+		positionSubmenu(menu);
+		menu.hidden = false;
+		trigger.setAttribute("aria-expanded", "true");
+	} else if (!menu.hidden) {
+		menu.hidden = true;
+		trigger.setAttribute("aria-expanded", "false");
+	}
+}
+
+/// 子菜单视口碰撞：右缘放不下翻到左侧，下缘放不下对齐底边。
+function positionSubmenu(menu) {
+	menu.classList.remove("open-left", "open-up");
+	const wasHidden = menu.hidden;
+	if (wasHidden) {
+		menu.hidden = false;
+		menu.style.visibility = "hidden";
+	}
+	const margin = 8;
+	const rect = menu.getBoundingClientRect();
+	if (rect.right + margin > window.innerWidth && rect.left - rect.width - margin >= 0) {
+		menu.classList.add("open-left");
+	}
+	const adjusted = menu.getBoundingClientRect();
+	if (adjusted.bottom + margin > window.innerHeight && adjusted.top - adjusted.height - margin >= 0) {
+		menu.classList.add("open-up");
+	}
+	if (wasHidden) {
+		menu.hidden = true;
+		menu.style.visibility = "";
+	}
+}
+
+/// 当前可见且可用的 menuitem（隐藏子菜单里的条目会被 offsetParent 过滤掉）。
+function visibleEnabledMenuItems(menu) {
+	return [...menu.querySelectorAll("button[role='menuitem']")].filter(
+		(el) => !el.disabled && el.offsetParent !== null,
+	);
+}
+
+async function loadRecentLocations() {
+	try {
+		recentLocations = (await invoke("list_recent_locations")) || [];
+	} catch (error) {
+		console.error("读取最近打开失败", error);
+		recentLocations = [];
+	}
+	if (!fileMenu.hidden) renderRecentMenu();
+}
+
+/// renderRecentMenu(items)：只投影 recentLocations，不缓存第二份真值。
+function renderRecentMenu() {
+	const models = recentLocations.map(FileMenuHelpers.recentItemModel);
+	recentMenu.replaceChildren();
+	if (!models.length) {
+		const empty = document.createElement("div");
+		empty.className = "recent-menu-empty";
+		empty.textContent = "暂无最近记录";
+		recentMenu.appendChild(empty);
+	} else {
+		models.slice(0, 12).forEach((model) => {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.setAttribute("role", "menuitem");
+			button.className = "recent-item";
+			button.disabled = model.disabled;
+			button.title = model.title;
+			const line = document.createElement("span");
+			line.className = "recent-item-line";
+			const icon = document.createElement("span");
+			icon.className = "recent-item-icon";
+			icon.setAttribute("aria-hidden", "true");
+			icon.textContent = model.icon;
+			const label = document.createElement("span");
+			label.className = "recent-item-label";
+			label.textContent = model.displayLabel;
+			line.append(icon, label);
+			const path = document.createElement("span");
+			path.className = "recent-item-path";
+			path.textContent = model.path;
+			button.append(line, path);
+			button.addEventListener("click", () => {
+				setFileMenuOpen(false);
+				void openRecentLocation(model);
+			});
+			recentMenu.appendChild(button);
+		});
+	}
+	const divider = document.createElement("div");
+	divider.className = "menu-divider";
+	divider.setAttribute("role", "separator");
+	const clear = document.createElement("button");
+	clear.type = "button";
+	clear.setAttribute("role", "menuitem");
+	clear.className = "recent-clear";
+	clear.textContent = "清除最近记录";
+	clear.disabled = !models.length;
+	clear.addEventListener("click", async () => {
+		setFileMenuOpen(false);
+		try {
+			await invoke("clear_recent_locations");
+			recentLocations = [];
+		} catch (error) {
+			console.error("清除最近打开失败", error);
+		}
+	});
+	recentMenu.append(divider, clear);
+}
+
+async function openRecentLocation(model) {
+	try {
+		if (agentBusy) await cancelAgentTurn();
+		await saveCurrent();
+		if (annotateDirty) await saveAnnotate();
+		if (model.kind === "workspace") {
+			const data = await invoke("open_recent_workspace", { path: model.path });
+			await openWorkspaceData(data);
+		} else {
+			const data = await invoke("open_recent_document", { path: model.path });
+			currentFile = data.path;
+			currentAgentDocument = null;
+			await setSidebarMode("workspace");
+			await useWorkspace(data);
+			showDocument(data.path, data.name, data.content, null);
+		}
+	} catch (error) {
+		console.error(error);
+		markError(backendErrorMessage(error, "打开失败：目标可能已不存在"));
+	}
+}
+
+// ---- 文件树右键菜单：单个共享节点，运行时按 node kind 注入条目 ----
+
+function openTreeContextMenu(context, x, y) {
+	treeContextMenu.replaceChildren();
+	const entries = [];
+	if (context.kind === "markdown") {
+		entries.push({
+			label: "打开",
+			action: () => void openFile(context.path, context.name, null),
+		});
+	} else {
+		// root 与 directory 同一组动作；reveal 作用于该目录自身
+		entries.push({
+			label: "新建 Markdown",
+			action: () => openNewFileDialogUnder(context.path),
+		});
+		entries.push({
+			label: "新建文件夹",
+			action: () => openNewFolderDialogUnder(context.path),
+		});
+	}
+	entries.push({ separator: true });
+	entries.push({
+		label: "在文件管理器中显示",
+		action: () => void revealPath(context.path),
+	});
+	for (const entry of entries) {
+		if (entry.separator) {
+			const divider = document.createElement("div");
+			divider.className = "menu-divider";
+			divider.setAttribute("role", "separator");
+			treeContextMenu.appendChild(divider);
+			continue;
+		}
+		const button = document.createElement("button");
+		button.type = "button";
+		button.setAttribute("role", "menuitem");
+		button.textContent = entry.label;
+		button.addEventListener("click", () => {
+			closeTreeContextMenu();
+			entry.action();
+		});
+		treeContextMenu.appendChild(button);
+	}
+	treeContextMenu.hidden = false;
+	const rect = treeContextMenu.getBoundingClientRect();
+	treeContextMenu.style.left = `${Math.max(
+		4,
+		Math.min(x, window.innerWidth - rect.width - 4),
+	)}px`;
+	treeContextMenu.style.top = `${Math.max(
+		4,
+		Math.min(y, window.innerHeight - rect.height - 4),
+	)}px`;
+	const first = treeContextMenu.querySelector("button");
+	first?.focus();
+}
+
+function closeTreeContextMenu() {
+	treeContextMenu.hidden = true;
+}
+
+/// 右键目录新建 Markdown：backend 只接受 root-relative 路径，
+/// 对话框默认 untitled.md，子目录时预填 docs/research/untitled.md。
+function openNewFileDialogUnder(directoryPath) {
+	if (!rootPath) return;
+	const prefix = relativeDirPrefix(directoryPath);
+	newFileName.value = prefix ? `${prefix}/untitled.md` : "untitled.md";
+	newFileDialog.showModal();
+	requestAnimationFrame(() => newFileName.select());
+}
+
+function openNewFolderDialogUnder(directoryPath) {
+	if (!rootPath) return;
+	pendingNewFolderParent = directoryPath;
+	newFolderName.value = "untitled";
+	newFolderDialog.showModal();
+	requestAnimationFrame(() => newFolderName.select());
+}
+
+async function createWorkspaceFolder(parentPath, name) {
+	try {
+		await invoke("create_workspace_folder", { parentPath, name });
+		await refreshWorkspace();
+	} catch (error) {
+		console.error(error);
+		markError(backendErrorMessage(error, "新建文件夹失败"));
+	}
+}
+
+function relativeDirPrefix(directoryPath) {
+	if (!rootPath || !directoryPath || samePath(directoryPath, rootPath)) return "";
+	const normalizedDir = directoryPath.replaceAll("\\", "/").replace(/\/+$/, "");
+	const normalizedRoot = rootPath.replaceAll("\\", "/").replace(/\/+$/, "");
+	return normalizedDir.startsWith(`${normalizedRoot}/`)
+		? normalizedDir.slice(normalizedRoot.length + 1)
+		: "";
 }
 
 bindResize(
@@ -5147,17 +5703,144 @@ clearWorksetButton.addEventListener("click", () => {
 	renderCitationSummary();
 	if (libraryMode && searchInput.value.trim()) void runSearch();
 });
-document.querySelector("#refreshMenu").addEventListener("click", refreshTree);
 document.querySelector("#saveDocument").addEventListener("click", saveCurrent);
+saveDocumentAsItem.addEventListener("click", () => void saveDocumentAs());
 fileMenuButton.addEventListener("click", () =>
 	setFileMenuOpen(fileMenu.hidden),
 );
 fileMenu.addEventListener("click", (event) => {
-	if (event.target.closest("button")) setFileMenuOpen(false);
+	const button = event.target.closest("button");
+	if (!button) return;
+	// 子菜单触发项：点击始终打开（不 toggle）——hover 可能已把它打开，
+	// 此时点击不应把刚打开的子菜单立刻关掉；关闭走 hover 离开 / Esc / Left。
+	if (button === recentMenuTrigger) {
+		setFileMenuSubmenuOpen(recentMenuTrigger, recentMenu, true);
+		return;
+	}
+	if (button === workspaceMenuTrigger) {
+		setFileMenuSubmenuOpen(workspaceMenuTrigger, workspaceMenu, true);
+		return;
+	}
+	// 普通项（含子菜单内条目）：各自 handler 执行动作，这里统一收口关闭
+	if (!button.disabled) setFileMenuOpen(false);
 });
+// hover 可以打开子菜单，但不只依赖 hover；离开不立即关闭（跨 6px gap 不闪烁）
+function bindFileSubmenuHover(wrap, trigger, menu) {
+	wrap.addEventListener("pointerenter", () => {
+		clearTimeout(submenuHoverCloseTimer);
+		if (!fileMenu.hidden && !trigger.disabled) {
+			setFileMenuSubmenuOpen(trigger, menu, true);
+		}
+	});
+	wrap.addEventListener("pointerleave", () => {
+		clearTimeout(submenuHoverCloseTimer);
+		submenuHoverCloseTimer = setTimeout(() => {
+			if (!wrap.matches(":hover") && !menu.matches(":hover")) {
+				setFileMenuSubmenuOpen(trigger, menu, false);
+			}
+		}, 220);
+	});
+}
+bindFileSubmenuHover(
+	document.querySelector("#recentMenuWrap"),
+	recentMenuTrigger,
+	recentMenu,
+);
+bindFileSubmenuHover(
+	document.querySelector("#workspaceMenuWrap"),
+	workspaceMenuTrigger,
+	workspaceMenu,
+);
+// 键盘导航：Down/Up 在当前菜单移动，Right 进子菜单，Left 回父项，Home/End 首尾
+fileMenuRoot.addEventListener("keydown", (event) => {
+	const key = event.key;
+	const focusTarget = event.target instanceof Element ? event.target : null;
+	if (key === "ArrowDown" || key === "ArrowUp") {
+		event.preventDefault();
+		if (fileMenu.hidden) {
+			setFileMenuOpen(true);
+			return;
+		}
+		const menu = focusTarget?.closest("[role='menu']");
+		if (!menu) {
+			visibleEnabledMenuItems(fileMenu)[0]?.focus();
+			return;
+		}
+		navigateMenuItems(menu, focusTarget, key === "ArrowDown" ? 1 : -1);
+		return;
+	}
+	if (key === "ArrowRight") {
+		if (focusTarget === recentMenuTrigger && recentMenu.hidden) {
+			event.preventDefault();
+			setFileMenuSubmenuOpen(recentMenuTrigger, recentMenu, true);
+			visibleEnabledMenuItems(recentMenu)[0]?.focus();
+		} else if (
+			focusTarget === workspaceMenuTrigger &&
+			workspaceMenu.hidden
+		) {
+			event.preventDefault();
+			setFileMenuSubmenuOpen(workspaceMenuTrigger, workspaceMenu, true);
+			visibleEnabledMenuItems(workspaceMenu)[0]?.focus();
+		}
+		return;
+	}
+	if (key === "ArrowLeft") {
+		const menu = focusTarget?.closest("[role='menu']");
+		if (menu === recentMenu || menu === workspaceMenu) {
+			event.preventDefault();
+			const trigger = menu === recentMenu ? recentMenuTrigger : workspaceMenuTrigger;
+			setFileMenuSubmenuOpen(trigger, menu, false);
+			trigger.focus();
+		}
+		return;
+	}
+	if (key === "Home" || key === "End") {
+		const menu = focusTarget?.closest("[role='menu']");
+		if (!menu) return;
+		event.preventDefault();
+		navigateMenuItems(menu, null, key === "Home" ? "first" : "end");
+	}
+});
+function navigateMenuItems(menu, currentEl, direction) {
+	const items = visibleEnabledMenuItems(menu);
+	const models = items.map((el) => ({ disabled: el.disabled, hidden: el.hidden }));
+	if (direction === "first" || direction === "end") {
+		const edge = FileMenuHelpers.edgeEnabledMenuItem(
+			models,
+			direction === "first" ? "first" : "end",
+		);
+		if (edge >= 0) items[edge].focus();
+		return;
+	}
+	const current = currentEl ? items.indexOf(currentEl) : -1;
+	const next = FileMenuHelpers.nextEnabledMenuItem(models, current, direction);
+	if (next >= 0) items[next].focus();
+}
+workspaceRevealItem.addEventListener("click", () => {
+	if (rootPath) void revealPath(rootPath);
+});
+workspaceRefreshItem.addEventListener("click", () => void refreshWorkspace());
+workspaceAggregateItem.addEventListener("click", () => {
+	if (!annotateVisible) setAnnotateVisible(true);
+	void doAggregateAnnotations();
+});
+workspaceCloseItem.addEventListener("click", () => void closeWorkspace());
 document.addEventListener("pointerdown", (event) => {
 	if (!fileMenuRoot.contains(event.target)) setFileMenuOpen(false);
+	if (
+		!treeContextMenu.hidden &&
+		!treeContextMenu.contains(event.target)
+	)
+		closeTreeContextMenu();
 });
+newFolderForm.addEventListener("submit", (event) => {
+	event.preventDefault();
+	const name = newFolderName.value.trim();
+	if (!name || !pendingNewFolderParent) return;
+	newFolderDialog.close();
+	void createWorkspaceFolder(pendingNewFolderParent, name);
+});
+cancelNewFolderButton.addEventListener("click", () => newFolderDialog.close());
 document
 	.querySelector("#toggleSidebar")
 	.addEventListener("click", () => setSidebarVisible(!sidebarVisible));
@@ -5201,10 +5884,6 @@ newAnnotationButton.addEventListener("click", () => beginAnnotation());
 addAnnotationButton.addEventListener("click", addPendingAnnotation);
 cancelAnnotationButton.addEventListener("click", cancelAnnotation);
 aggregateButton.addEventListener("click", doAggregateAnnotations);
-aggregateMenu.addEventListener("click", () => {
-	if (!annotateVisible) setAnnotateVisible(true);
-	doAggregateAnnotations();
-});
 annotationDraft.addEventListener("input", () =>
 	autosizeAnnotationEditor(annotationDraft),
 );
@@ -5312,10 +5991,23 @@ window.addEventListener("keydown", (event) => {
 			closeHeadingMenu();
 			return;
 		}
+		if (!treeContextMenu.hidden) {
+			event.preventDefault();
+			closeTreeContextMenu();
+			return;
+		}
 		if (!fileMenu.hidden) {
 			event.preventDefault();
-			setFileMenuOpen(false);
-			fileMenuButton.focus();
+			// Esc 先关 submenu，再关 File menu
+			if (anyFileSubmenuOpen()) {
+				const openMenu = !recentMenu.hidden ? recentMenu : workspaceMenu;
+				const trigger = openMenu === recentMenu ? recentMenuTrigger : workspaceMenuTrigger;
+				setFileMenuSubmenuOpen(trigger, openMenu, false);
+				trigger.focus();
+			} else {
+				setFileMenuOpen(false);
+				fileMenuButton.focus();
+			}
 			return;
 		}
 	}
@@ -5329,7 +6021,8 @@ window.addEventListener("keydown", (event) => {
 	}
 	if (key === "s") {
 		event.preventDefault();
-		saveCurrent();
+		if (event.shiftKey) void saveDocumentAs();
+		else void saveCurrent();
 	}
 	if (key === "n") {
 		event.preventDefault();

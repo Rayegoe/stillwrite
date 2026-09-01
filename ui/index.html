@@ -29,26 +29,72 @@
               文件 <span aria-hidden="true">⌄</span>
             </button>
             <div class="file-menu-popover" id="fileMenu" role="menu" hidden>
-              <button id="openFolder" role="menuitem">
-                <span>打开文件夹…</span><kbd>Ctrl+O</kbd>
-              </button>
-              <button id="openDocument" role="menuitem">
-                <span>打开 Markdown…</span><kbd>Ctrl+Shift+O</kbd>
-              </button>
-              <div class="menu-divider" role="separator"></div>
               <button id="newFile" role="menuitem">
                 <span>新建 Markdown</span><kbd>Ctrl+N</kbd>
               </button>
+              <div class="menu-divider" role="separator"></div>
+              <button id="openDocument" role="menuitem">
+                <span>打开 Markdown…</span><kbd>Ctrl+Shift+O</kbd>
+              </button>
+              <button id="openFolder" role="menuitem">
+                <span>打开文件夹…</span><kbd>Ctrl+O</kbd>
+              </button>
+              <div class="file-menu-submenu-wrap" id="recentMenuWrap">
+                <button
+                  id="recentMenuTrigger"
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                >
+                  <span>最近打开</span
+                  ><span class="submenu-chevron" aria-hidden="true">›</span>
+                </button>
+                <div
+                  class="file-menu-popover submenu"
+                  id="recentMenu"
+                  role="menu"
+                  hidden
+                ></div>
+              </div>
+              <div class="menu-divider" role="separator"></div>
               <button id="saveDocument" role="menuitem">
                 <span>保存</span><kbd>Ctrl+S</kbd>
               </button>
-              <button id="refreshMenu" role="menuitem">
-                <span>刷新目录</span><kbd>Ctrl+R</kbd>
+              <button id="saveDocumentAs" role="menuitem">
+                <span>另存为…</span><kbd>Ctrl+Shift+S</kbd>
               </button>
               <div class="menu-divider" role="separator"></div>
-              <button id="aggregateMenu" role="menuitem">
-                <span>汇总批注 → 批注汇总.md</span>
-              </button>
+              <div class="file-menu-submenu-wrap" id="workspaceMenuWrap">
+                <button
+                  id="workspaceMenuTrigger"
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                >
+                  <span>工作区</span
+                  ><span class="submenu-chevron" aria-hidden="true">›</span>
+                </button>
+                <div
+                  class="file-menu-popover submenu"
+                  id="workspaceMenu"
+                  role="menu"
+                  hidden
+                >
+                  <button id="workspaceReveal" role="menuitem">
+                    <span>在文件管理器中显示</span>
+                  </button>
+                  <button id="workspaceRefresh" role="menuitem">
+                    <span>刷新工作区</span>
+                  </button>
+                  <button id="workspaceAggregate" role="menuitem">
+                    <span>汇总工作区批注</span>
+                  </button>
+                  <div class="menu-divider" role="separator"></div>
+                  <button id="workspaceClose" role="menuitem">
+                    <span>关闭工作区</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
           <button
@@ -413,6 +459,33 @@
             </button>
           </div>
         </section>
+
+        <div
+          class="margin-control"
+          id="marginControl"
+          title="阅读区页边距"
+          aria-label="阅读区页边距"
+        >
+          <button
+            class="margin-btn"
+            id="marginNarrow"
+            type="button"
+            aria-label="减小页边距"
+            title="减小页边距"
+          >
+            −
+          </button>
+          <span class="margin-value" id="marginValue">64</span>
+          <button
+            class="margin-btn"
+            id="marginWide"
+            type="button"
+            aria-label="增大页边距"
+            title="增大页边距"
+          >
+            ＋
+          </button>
+        </div>
       </main>
     </div>
 
@@ -544,12 +617,32 @@
       </button>
     </div>
 
+    <dialog id="newFolderDialog" class="modal">
+      <form method="dialog" id="newFolderForm">
+        <h3>新建文件夹</h3>
+        <label for="newFolderName">文件夹名</label>
+        <input id="newFolderName" value="untitled" autocomplete="off" />
+        <p class="modal-help">在所选目录下创建；名称不能包含 <code>/</code> 或 <code>\</code></p>
+        <div class="modal-actions">
+          <button type="button" class="text-btn" id="cancelNewFolder">
+            取消
+          </button>
+          <button type="submit" class="primary-btn" id="createFolderButton">
+            创建
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="tree-context-menu" id="treeContextMenu" role="menu" hidden></div>
+
     <script src="./annotations.js"></script>
     <script src="./document-links.js"></script>
     <script src="./markdown-formatting.js"></script>
     <script src="./agent-events.js"></script>
     <script src="./feeds.js"></script>
     <script src="./work-view.js"></script>
+    <script src="./file-menu.js"></script>
     <script src="./app.js"></script>
     <script src="./library-annotation-links.js"></script>
   </body>

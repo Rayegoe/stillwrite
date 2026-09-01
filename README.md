@@ -26,7 +26,8 @@
 - 写作 / 双栏 / 阅读三种模式，写作区和阅读区都能独占主窗口。
 - 主双栏比例可拖动；侧边栏宽度可拖动。
 - 打开真实本地文件夹，直接读写 `.md` / `.markdown`。
-- 文件菜单支持打开文件夹、直接打开 Markdown、新建、保存和刷新目录。
+- 文件菜单区分 File / Directory / Workspace 职责：新建与打开 Markdown、打开文件夹、最近打开、保存 / 另存为，以及 `工作区` 子菜单（显示、刷新、汇总批注、关闭工作区）。
+- `最近打开` 是保存在本机 `state.db` 的导航记录（最近 30 条），不进入语义事件，也不写入工作区。
 - 650ms 防抖自动保存，支持 `Ctrl+S`。
 - 记住上次目录、侧栏宽度、双栏比例和视图模式。
 - 正文仍是唯一内容源；SQLite 只做可删除重建的 Workspace / Library 侧车索引。
@@ -167,6 +168,18 @@ RSS 只是一个 **Library 输入适配器**，不是第四个顶层平面，也
 - 格式栏状态随文档类型切换：Workspace 全功能；Agent Work 禁用上传；Library / 仅阅读模式 / 未打开文档时正文变换按钮禁用或整栏隐藏；`批注` 始终可用。
 - 阅读区扩展：任务列表（`- [ ]` / `- [x]`，checkbox 只读）、Markdown 图片（远程直接显示、本地经后端 data URL 水合）、GFM 管道表格（含对齐 `:---` 语法）；sanitizer 改为 tag-aware 属性白名单，原文中的 `data:` / `javascript:` 图片与事件属性一律不放行。
 
+## v0.9 原型：File / Workspace 菜单与文件树安全动作（本分支新增）
+
+顶部 `文件` 菜单从单层平铺迁移到 File / Workspace 分层，文件树获得最小右键动作集：
+
+- 文件菜单分组为：新建 Markdown；打开 Markdown / 打开文件夹 / 最近打开；保存 / 另存为；`工作区` 子菜单（在文件管理器中显示、刷新工作区、汇总工作区批注、关闭工作区）。原来的平铺 `刷新目录` 与 `汇总批注` 移入工作区子菜单。
+- `打开 Markdown` 保持现有语义：文件父目录激活为 Workspace，不引入“单文件模式”。`最近打开` 混合记录显式打开的 Workspace 与 Markdown（schema v5 `recent_locations`，每 kind+path 去重 upsert，保留 30 条，显示 12 条）；不可用路径禁用但不自动删除；`清除最近记录` 一次清空。启动恢复不改变最近记录顺序。
+- `另存为…`（`Ctrl+Shift+S`）只对 Workspace Markdown 可用：目标必须仍在当前工作区、不覆盖已有文件、原文件保留、新文档不继承批注 sidecar，不会因另存到外部路径而偷换工作上下文。
+- `关闭工作区` 有真实 backend lifecycle：先落盘可编辑内容与待保存批注、中止进行中的 Agent run（对应 Work 转 cancelled），再关闭 Pi 进程并解除 active root；Markdown / 批注 / Work / 关联 / 最近记录全部保留。
+- `刷新工作区` 与切换工作区区分：same root 不取消 Agent、不清运行时缓存；当前 Library / Work projection 不被打断。
+- 文件树右键菜单只做安全子集：目录（含根）`新建 Markdown / 新建文件夹 / 在文件管理器中显示`，Markdown `打开 / 在文件管理器中显示`。reveal 与新建都经 backend 路径校验（拒绝越界、符号链接逃逸、已存在目标）。
+- 文件树现在也显示真正的空文件夹（新建后立即可见）；只含图片等非 Markdown 文件的目录继续隐藏。
+
 ## vNext Foundation：统一维护基线
 
 `stillwrite-vnext-foundation` 已纳入本仓库，作为后续 Agent 迭代的产品与工程契约。它描述目标架构，不等同于当前所有能力都已实现：
@@ -205,7 +218,8 @@ Work 重构前必须遵守四个兼容接缝：
 | Ctrl/Cmd + Shift + O | 打开 Markdown 文档 |
 | Ctrl/Cmd + N | 新建 Markdown |
 | Ctrl/Cmd + S | 立即保存 |
-| Ctrl/Cmd + R | 刷新目录 |
+| Ctrl/Cmd + Shift + S | 另存为（仅 Workspace Markdown） |
+| Ctrl/Cmd + R | 刷新目录 / 工作区 |
 | Ctrl/Cmd + B | 编辑器聚焦：粗体；其他位置：显示/隐藏文件栏 |
 | Ctrl/Cmd + Shift + B | 显示/隐藏文件栏 |
 | Ctrl/Cmd + I | 斜体 |
@@ -297,6 +311,8 @@ stillwrite/
 │   ├── agent-events.test.js # Agent 事件归约测试
 │   ├── markdown-formatting.js # 文档格式栏的纯 Markdown 变换（selection-based，无 DOM 依赖）
 │   ├── markdown-formatting.test.js # 格式命令矩阵与选区正确性测试
+│   ├── file-menu.js # 文件菜单启用矩阵 / 最近打开条目 / 键盘导航纯函数
+│   ├── file-menu.test.js # 文件菜单状态矩阵与最近打开投影测试
 │   ├── renderer-helpers.test.js # 阅读区 table/图片 renderer 纯函数测试
 │   ├── app.js          # 文件树、Library、搜索、关联、引用篮、同步、预览、布局、批注、格式栏接线
 │   └── style.css       # 沉浸式双栏视觉 + 批注栏 + 资料库 + 格式工具栏
@@ -309,7 +325,7 @@ stillwrite/
     ├── src/library.rs   # 外部 Markdown 资料源、增量索引、SHA-256 去重、只读读取
     ├── src/feeds.rs    # RSS/Atom 源：抓取 + 解析 + 物化 Markdown + OPML 导入 + 单测
     ├── src/sync.rs     # git 同步引擎（最后写入者胜 + 单测 + 板子集成测试）
-    ├── src/state_store.rs # vNext P1 durable state（state.db）：migration runner + events/anchors/relations/context 原语与事务边界
+    ├── src/state_store.rs # vNext durable state（state.db）：migration runner + events/anchors/relations/context/web_search/works/recent_locations 与事务边界
     ├── src/work.rs     # Work durable 协调对象（M1）：状态机 + work.created/status_changed/updated 事件 + Pi 桥接查询
     ├── resources/pi/  # StillWrite system prompt 与只读 Workspace 工具扩展
     ├── capabilities/   # 最小 IPC 权限
@@ -322,6 +338,7 @@ stillwrite/
 node ui/annotations.test.js # 结构化批注前端单元测试
 node ui/document-links.test.js # 项目内文档链接与 URL 单元测试
 node ui/agent-events.test.js # Agent 流式事件归约与结束状态测试
+node --test ui/*.test.js # 全部前端纯函数测试（含文件菜单、格式栏）
 cd src-tauri
 cargo test                # 默认单测、批注流程测试、state.db durable 契约与 Work 生命周期（无 UI）测试；另有 2 个按需调试/网络测试
 cargo test -- --ignored live   # 需要配置的远程设备在线：真实跨设备推送/拉取/冲突收敛

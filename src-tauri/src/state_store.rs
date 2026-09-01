@@ -4,6 +4,11 @@
 //! index.db 里全是可重建的 FTS/trigram，而本模块的表（events / anchors /
 //! relations / context_* / web_search_*）是产品事实，不允许当作 sidecar 删除。
 //!
+//! 唯一例外是 [`recent_locations`]（schema v5）：它是 machine-local 的
+//! shell 导航状态（“最近打开”），保存本机绝对路径以便重新打开。它不参与
+//! canonical URI / Relation / Memory / Work，不写入 `workspace://` 语义图，
+//! 不 append semantic event，也不跨机器同步。不要把它当作 Entity 使用。
+//!
 //! 约定：
 //! - durable state 位于应用数据目录下的单个 `state.db`，与 workspace 解耦
 //!   （行内用 URI/workspace_id 区分来源，跨域 relation 才可能成立）；
@@ -33,7 +38,7 @@ pub struct Migration {
 }
 
 /// 当前 schema 版本；测试可以据此构造“旧版本数据库再增量迁移”的场景。
-pub const LATEST_SCHEMA_VERSION: i64 = 4;
+pub const LATEST_SCHEMA_VERSION: i64 = 5;
 
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -177,6 +182,22 @@ pub const MIGRATIONS: &[Migration] = &[
         CREATE INDEX idx_works_status ON works(status);
         -- 一次运行最多绑定一个 Work；NULL（无运行引用）不参与唯一约束。
         CREATE UNIQUE INDEX idx_works_receipt ON works(receipt_ref);
+        "#,
+    },
+    Migration {
+        version: 5,
+        name: "recent_locations",
+        sql: r#"
+        CREATE TABLE recent_locations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind        TEXT NOT NULL CHECK(kind IN ('workspace', 'document')),
+            path        TEXT NOT NULL,
+            opened_at   TEXT NOT NULL,
+            UNIQUE(kind, path)
+        );
+
+        CREATE INDEX idx_recent_locations_opened
+            ON recent_locations(opened_at DESC, id DESC);
         "#,
     },
 ];
@@ -1651,6 +1672,113 @@ pub fn now_iso() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Recent locations（“最近打开”）
+// machine-local shell 导航状态：绝对路径只允许出现在这里，不是 canonical
+// object graph 的成员；record/clear 不 append semantic event（见模块注释）。
+// ---------------------------------------------------------------------------
+
+/// 同一 kind + path 的重复打开只刷新时间，不产生第二条记录。
+pub const RECENT_LOCATIONS_MAX_ROWS: usize = 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecentLocationKind {
+    Workspace,
+    Document,
+}
+
+impl RecentLocationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecentLocationKind::Workspace => "workspace",
+            RecentLocationKind::Document => "document",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentLocationView {
+    pub id: i64,
+    pub kind: String,
+    pub path: String,
+    pub label: String,
+    pub available: bool,
+    pub opened_at: String,
+}
+
+/// upsert（同 kind + path 刷新 opened_at）+ 裁剪到最近 [`RECENT_LOCATIONS_MAX_ROWS`] 条。
+pub fn record_recent_location(
+    conn: &mut Connection,
+    kind: RecentLocationKind,
+    path: &str,
+) -> Result<(), String> {
+    tx_command(conn, |tx| {
+        tx.execute(
+            "INSERT INTO recent_locations (kind, path, opened_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(kind, path) DO UPDATE SET opened_at = excluded.opened_at",
+            params![kind.as_str(), path, now_iso()],
+        )
+        .map_err(|e| format!("记录最近打开失败: {e}"))?;
+        tx.execute(
+            "DELETE FROM recent_locations WHERE id NOT IN (
+                SELECT id FROM recent_locations ORDER BY opened_at DESC, id DESC LIMIT ?1
+            )",
+            params![RECENT_LOCATIONS_MAX_ROWS as i64],
+        )
+        .map_err(|e| format!("清理最近打开记录失败: {e}"))?;
+        Ok(())
+    })
+}
+
+/// 最近打开列表（opened_at DESC, id DESC）。`available` 每次查询时按
+/// filesystem metadata 现算，不落库：路径可能稍后又挂载回来。
+pub fn list_recent_locations(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<RecentLocationView>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, kind, path, opened_at FROM recent_locations
+             ORDER BY opened_at DESC, id DESC LIMIT ?1",
+        )
+        .map_err(|e| format!("读取最近打开失败: {e}"))?;
+    let rows = stmt
+        .query_map(params![limit.clamp(1, 200) as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| format!("读取最近打开失败: {e}"))?;
+    let mut views = Vec::new();
+    for row in rows {
+        let (id, kind, path, opened_at) = row.map_err(|e| format!("读取最近打开失败: {e}"))?;
+        let label = Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+        let available = std::path::Path::new(&path).exists();
+        views.push(RecentLocationView {
+            id,
+            kind,
+            path,
+            label,
+            available,
+            opened_at,
+        });
+    }
+    Ok(views)
+}
+
+/// 一次清空全部最近打开记录；返回删除条数（仅用于确认）。
+pub fn clear_recent_locations(conn: &mut Connection) -> Result<usize, String> {
+    conn.execute("DELETE FROM recent_locations", [])
+        .map_err(|e| format!("清除最近打开失败: {e}"))
+}
+
+// ---------------------------------------------------------------------------
 // Contract tests（P1 验收标准逐条落地）
 // ---------------------------------------------------------------------------
 
@@ -1711,6 +1839,7 @@ mod tests {
             "web_searches",
             "web_search_results",
             "works",
+            "recent_locations",
         ] {
             let n: i64 = conn
                 .query_row(
@@ -1808,6 +1937,191 @@ mod tests {
     fn migration_versions_are_contiguous() {
         validate_migration_list();
         assert_eq!(MIGRATIONS.last().unwrap().version, LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v4_database_migrates_to_v5_and_preserves_existing_data() {
+        let dir = TempDir::new("state-v4-to-v5");
+        let db_path = dir.path().join("state.db");
+        {
+            let mut conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL);",
+            )
+            .unwrap();
+            // 只应用 v1–v4：构造一个真实的“上一版”数据库
+            for migration in &MIGRATIONS[..4] {
+                conn.execute_batch(migration.sql).unwrap();
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                    params![migration.version, migration.name, now_iso()],
+                )
+                .unwrap();
+            }
+            create_relation(
+                &mut conn,
+                NewRelation {
+                    source_uri: ObjectUri::workspace("a.md").unwrap(),
+                    predicate: "related_to".into(),
+                    target_uri: ObjectUri::library("src1", "x.md").unwrap(),
+                    anchor_id: None,
+                    created_by: None,
+                    confidence: None,
+                    workspace_id: None,
+                    snapshot: None,
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO works (id, workspace_id, title, intent, status, created_at, updated_at)
+                 VALUES ('w1', 'ws', 't', 'i', 'queued', 'now', 'now')",
+                [],
+            )
+            .unwrap();
+        }
+        let conn = open_state_db(&db_path).unwrap();
+        assert_eq!(
+            current_schema_version(&conn).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        // 既有 durable 数据原样保留，新表可用
+        assert_eq!(list_events(&conn, 10).unwrap().len(), 1);
+        assert_eq!(
+            neighbors(&conn, "workspace://a.md", None, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        let works: i64 = conn
+            .query_row("SELECT COUNT(*) FROM works", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(works, 1);
+        let mut conn = conn;
+        record_recent_location(&mut conn, RecentLocationKind::Workspace, "/tmp/demo").unwrap();
+        let recent = list_recent_locations(&conn, 10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].label, "demo");
+    }
+
+    // ---- Recent locations ----
+
+    #[test]
+    fn recent_upsert_same_kind_and_path_keeps_single_row() {
+        let (_dir, mut conn) = open_fresh();
+        record_recent_location(&mut conn, RecentLocationKind::Workspace, "/home/me/project")
+            .unwrap();
+        record_recent_location(&mut conn, RecentLocationKind::Workspace, "/home/me/project")
+            .unwrap();
+        let items = list_recent_locations(&conn, 10).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "workspace");
+        assert_eq!(items[0].label, "project");
+    }
+
+    #[test]
+    fn recent_same_path_different_kind_are_distinct_rows() {
+        let (_dir, mut conn) = open_fresh();
+        record_recent_location(&mut conn, RecentLocationKind::Workspace, "/home/me/notes").unwrap();
+        record_recent_location(&mut conn, RecentLocationKind::Document, "/home/me/notes").unwrap();
+        let items = list_recent_locations(&conn, 10).unwrap();
+        assert_eq!(items.len(), 2);
+        let kinds: Vec<_> = items.iter().map(|item| item.kind.as_str()).collect();
+        assert!(kinds.contains(&"workspace"));
+        assert!(kinds.contains(&"document"));
+    }
+
+    #[test]
+    fn recent_list_orders_newest_first() {
+        let (_dir, mut conn) = open_fresh();
+        for name in ["a", "b", "c"] {
+            record_recent_location(
+                &mut conn,
+                RecentLocationKind::Workspace,
+                &format!("/home/me/{name}"),
+            )
+            .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // 重新打开 b：b 应该排到最前
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        record_recent_location(&mut conn, RecentLocationKind::Workspace, "/home/me/b").unwrap();
+        let labels: Vec<_> = list_recent_locations(&conn, 10)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert_eq!(labels, vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn recent_prunes_to_max_retention() {
+        let (_dir, mut conn) = open_fresh();
+        for index in 0..(RECENT_LOCATIONS_MAX_ROWS as i32 + 10) {
+            record_recent_location(
+                &mut conn,
+                RecentLocationKind::Workspace,
+                &format!("/home/me/dir-{index:03}"),
+            )
+            .unwrap();
+        }
+        let conn_ref = &conn;
+        let count: i64 = conn_ref
+            .query_row("SELECT COUNT(*) FROM recent_locations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count as usize, RECENT_LOCATIONS_MAX_ROWS);
+        // 保留的是最新的 30 条（最早的 10 条被裁掉）
+        let items = list_recent_locations(conn_ref, 200).unwrap();
+        assert!(!items.iter().any(|item| item.label == "dir-000"));
+        assert!(items.iter().any(|item| item.label == "dir-039"));
+    }
+
+    #[test]
+    fn recent_clear_all_and_availability_flag() {
+        let dir = TempDir::new("state-recent-clear");
+        let existing = dir.path().join("real.md");
+        std::fs::write(&existing, "# x").unwrap();
+        let (_d2, mut conn) = open_fresh();
+        record_recent_location(
+            &mut conn,
+            RecentLocationKind::Document,
+            &existing.to_string_lossy(),
+        )
+        .unwrap();
+        record_recent_location(&mut conn, RecentLocationKind::Workspace, "/gone/missing").unwrap();
+        let items = list_recent_locations(&conn, 10).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.kind == "document")
+                .unwrap()
+                .available,
+            true
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.kind == "workspace")
+                .unwrap()
+                .available,
+            false
+        );
+        let removed = clear_recent_locations(&mut conn).unwrap();
+        assert_eq!(removed, 2);
+        assert!(list_recent_locations(&conn, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recent_record_appends_no_semantic_events() {
+        let (_dir, mut conn) = open_fresh();
+        record_recent_location(&mut conn, RecentLocationKind::Workspace, "/home/me/x").unwrap();
+        clear_recent_locations(&mut conn).unwrap();
+        assert_eq!(list_events(&conn, 100).unwrap().len(), 0);
     }
 
     // ---- Events ----
