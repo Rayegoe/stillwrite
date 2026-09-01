@@ -1896,7 +1896,10 @@ mod tests {
         let actions: Vec<_> = events.iter().map(|event| event.action.as_str()).collect();
         assert_eq!(
             actions,
-            vec![event_action::WORK_STATUS_CHANGED, event_action::WORK_CREATED]
+            vec![
+                event_action::WORK_STATUS_CHANGED,
+                event_action::WORK_CREATED
+            ]
         );
         assert_eq!(events_for_work(&conn, "work-missing", 10).unwrap().len(), 0);
         let limited = events_for_work(&conn, "work-1", 1).unwrap();

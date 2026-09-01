@@ -3,6 +3,16 @@ const listen = window.__TAURI__.event?.listen;
 const openUrl = window.__TAURI__.opener?.openUrl;
 
 const shell = document.querySelector("#shell");
+const formatToolbar = document.querySelector("#formatToolbar");
+const headingMenu = document.querySelector("#headingMenu");
+const headingButton = document.querySelector('[data-format-command="heading"]');
+const formatButtons = new Map(
+	[...formatToolbar.querySelectorAll(".format-btn")].map((btn) => [
+		btn.dataset.formatCommand,
+		btn,
+	]),
+);
+const bodyClassList = document.body.classList;
 const sidebar = document.querySelector("#sidebar");
 const sidebarHandle = document.querySelector("#sidebarHandle");
 const paneHandle = document.querySelector("#paneHandle");
@@ -25,12 +35,16 @@ const searchInput = document.querySelector("#searchInput");
 const workspaceTab = document.querySelector("#workspaceTab");
 const libraryTab = document.querySelector("#libraryTab");
 const workTabRef = document.querySelector("#workTab");
-const legacyAgentWorksToggle = document.querySelector("#legacyAgentWorksToggle");
+const legacyAgentWorksToggle = document.querySelector(
+	"#legacyAgentWorksToggle",
+);
 const workPane = document.querySelector("#workPane");
 const workHome = document.querySelector("#workHome");
 const workDetail = document.querySelector("#workDetail");
 const workContextViewButton = document.querySelector("#workContextViewButton");
-const workEvidenceViewButton = document.querySelector("#workEvidenceViewButton");
+const workEvidenceViewButton = document.querySelector(
+	"#workEvidenceViewButton",
+);
 const workContextStream = document.querySelector("#workContextStream");
 const workEvidenceStream = document.querySelector("#workEvidenceStream");
 const workEvidenceCount = document.querySelector("#workEvidenceCount");
@@ -237,6 +251,14 @@ const ALLOWED_PREVIEW_TAGS = new Set([
 	"DIV",
 	"SPAN",
 	"BR",
+	"IMG",
+	"TABLE",
+	"THEAD",
+	"TBODY",
+	"TR",
+	"TH",
+	"TD",
+	"INPUT",
 ]);
 
 function escapeHtml(value) {
@@ -439,14 +461,13 @@ async function hydrateRelatedPins() {
 		}
 		for (const view of views) {
 			const snapshot =
-				view.snapshot && typeof view.snapshot === "object" ? { ...view.snapshot } : {};
+				view.snapshot && typeof view.snapshot === "object"
+					? { ...view.snapshot }
+					: {};
 			snapshot.key = relatedKeyFromTargetUri(view.relation.target_uri);
 			const restored = restoreRelatedPinnedItem(snapshot);
 			if (restored)
-				relatedPinnedItems.set(
-					`${prefix}${snapshot.key}`,
-					restored,
-				);
+				relatedPinnedItems.set(`${prefix}${snapshot.key}`, restored);
 		}
 		renderRelatedPanel();
 		if (migrationFailed) relatedPinsHydratedScope = null;
@@ -464,7 +485,8 @@ async function persistRelatedPinChange(item, pinned, storageKey, previous) {
 				targetUri: relatedItemTargetUri(item),
 				snapshot: serializableRelatedItem(item),
 			});
-		else await invoke("unpin_related", { targetUri: relatedItemTargetUri(item) });
+		else
+			await invoke("unpin_related", { targetUri: relatedItemTargetUri(item) });
 	} catch (error) {
 		console.warn("同步关联固定状态失败", error);
 		// 后端写入失败时撤销乐观 UI 更新；若用户已经再次点击，则保留最新意图。
@@ -781,7 +803,11 @@ function relatedSeedCandidates() {
 	const source = editor.value.replace(/\r\n?/g, "\n");
 	const h1Line = source.split("\n").find((line) => /^\s{0,3}#\s+/.test(line));
 	const h1 = h1Line ? h1Line.replace(/^\s{0,3}#\s+/, "") : "";
-	const h1Candidates = extractRelatedKeywordCandidates(h1, "h1", 1);
+	// 占位标题（Untitled / 未命名 等）与文件名一样不产生检索意图。
+	const h1Candidates =
+		h1 && !isGenericRelatedFilename(h1)
+			? extractRelatedKeywordCandidates(h1, "h1", 1)
+			: [];
 	const filename = basename(currentFile).replace(/\.(md|markdown)$/i, "");
 	const filenameCandidates =
 		filename && !isGenericRelatedFilename(filename)
@@ -864,7 +890,12 @@ function renderWebSearchToolbar() {
 }
 
 function setSupportView(view) {
-	supportView = ["related", "web-search", "work-context", "work-evidence"].includes(view)
+	supportView = [
+		"related",
+		"web-search",
+		"work-context",
+		"work-evidence",
+	].includes(view)
 		? view
 		: "annotation";
 	const related = supportView === "related";
@@ -1044,9 +1075,13 @@ function isExcludedRelatedWorkspacePath(path) {
 	const currentAnnotation = currentRelative.startsWith("批注/")
 		? ""
 		: relatedPath(`${rootPath}/批注/${currentRelative}`);
+	// 索引进来的 hit.path 是相对路径，而 currentFile 是绝对路径：
+	// 两种坐标系都参与比较，任何一侧命中都排除。
 	return (
 		normalized === current ||
 		normalized === currentAnnotation ||
+		relative === currentRelative ||
+		relative === relatedPath(`批注/${currentRelative}`) ||
 		relative === "批注汇总.md" ||
 		relative.endsWith("/批注汇总.md")
 	);
@@ -1449,6 +1484,15 @@ function renderInline(text) {
 		code.push({ token, html: `<code>${body}</code>` });
 		return token;
 	});
+	// 图片：先于链接处理，避免 `![alt](src)` 被链接规则吞掉。
+	// 远程 https/http → 直接 src；本地相对路径 → data-local-src 后置水合。
+	value = value.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt, src) => {
+		const raw = src.replaceAll("&amp;", "&");
+		if (/^https?:\/\//i.test(raw)) {
+			return `<img src="${raw}" alt="${alt || ""}" loading="lazy">`;
+		}
+		return `<img data-local-src="${raw}" alt="${alt || ""}" loading="lazy">`;
+	});
 	value = value.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 	value = value.replace(/__([^_]+)__/g, "<strong>$1</strong>");
 	value = value.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
@@ -1469,6 +1513,77 @@ function renderInline(text) {
 		value = value.replaceAll(token, () => html);
 	});
 	return value;
+}
+
+function splitTableRow(line) {
+	// 首尾可选 `|`；`\|` 视为正文 pipe，不拆列。
+	const cells = [];
+	let current = "";
+	const body = line.trim();
+	const start = body.startsWith("|") ? 1 : 0;
+	const end = body.endsWith("|") ? body.length - 1 : body.length;
+	for (let i = start; i < end; i += 1) {
+		const ch = body[i];
+		if (ch === "\\") {
+			// 转义序列整体保留：`\|` 是正文 pipe，不触发分列
+			current += ch;
+			if (i + 1 < end) {
+				current += body[i + 1];
+				i += 1;
+			}
+			continue;
+		}
+		if (ch === "|") {
+			cells.push(current);
+			current = "";
+			continue;
+		}
+		current += ch;
+	}
+	cells.push(current);
+	return cells.map((cell) => cell.trim());
+}
+
+function isTableDelimiter(line) {
+	const cells = splitTableRow(line);
+	return (
+		cells.length >= 2 &&
+		cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/^\s+|\s+$/g, "")))
+	);
+}
+
+function tableCellAlignClass(delimiter) {
+	const value = delimiter.replace(/^\s+|\s+$/g, "");
+	if (value.startsWith(":") && value.endsWith(":")) return "align-center";
+	if (value.endsWith(":")) return "align-right";
+	if (value.startsWith(":")) return "align-left";
+	return "align-left";
+}
+
+function renderTable(headerCells, delimiterCells, rows) {
+	const align = headerCells.map((_, i) =>
+		tableCellAlignClass(delimiterCells[i] || "---"),
+	);
+	const thead = `<thead><tr>${headerCells
+		.map(
+			(cell, i) =>
+				`<th class="${align[i]}">${renderInline(cell)}</th>`,
+		)
+		.join("")}</tr></thead>`;
+	const tbody = rows.length
+		? `<tbody>${rows
+				.map(
+					(row) =>
+						`<tr>${row
+							.map(
+								(cell, i) =>
+									`<td class="${align[i] || "align-left"}">${renderInline(cell)}</td>`,
+							)
+							.join("")}</tr>`,
+				)
+				.join("")}</tbody>`
+		: "";
+	return `<table>${thead}${tbody}</table>`;
 }
 
 function renderMarkdown(source) {
@@ -1502,7 +1617,8 @@ function renderMarkdown(source) {
 		codeLines = [];
 	};
 
-	for (const line of lines) {
+	for (let i = 0; i < lines.length; i += 1) {
+		const line = lines[i];
 		// 批注侧车中的结构标记是 Markdown 注释，阅读时不应显示。
 		if (
 			/^<!-- \/?stillwrite-(?:annotations|annotation|quote)/.test(line.trim())
@@ -1562,17 +1678,44 @@ function renderMarkdown(source) {
 			continue;
 		}
 
+		// GFM 表格：当前行含 `|` 且下一行是合法分隔行
+		if (line.includes("|") && lines[i + 1] && isTableDelimiter(lines[i + 1])) {
+			const headerCells = splitTableRow(line);
+			const delimiterCells = splitTableRow(lines[i + 1]);
+			i += 1; // 消费分隔行
+			const rows = [];
+			while (i + 1 < lines.length) {
+				const next = lines[i + 1];
+				if (!next.trim() || !next.includes("|")) break;
+				if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(next)) break;
+				i += 1;
+				rows.push(splitTableRow(next));
+			}
+			flushParagraph();
+			closeList();
+			html.push(renderTable(headerCells, delimiterCells, rows));
+			continue;
+		}
+
+		const task = line.match(/^\s*[-+*]\s+\[([ xX])\]\s+(.+)$/);
 		const ul = line.match(/^\s*[-+*]\s+(.+)$/);
 		const ol = line.match(/^\s*\d+[.)]\s+(.+)$/);
-		if (ul || ol) {
+		if (task || ul || ol) {
 			flushParagraph();
-			const wanted = ul ? "ul" : "ol";
+			const wanted = task || ul ? "ul" : "ol";
 			if (listType !== wanted) {
 				closeList();
-				html.push(`<${wanted}>`);
+				html.push(wanted === "ul" ? '<ul class="task-list">' : "<ol>");
 				listType = wanted;
 			}
-			html.push(`<li>${renderInline((ul || ol)[1])}</li>`);
+			if (task) {
+				const checked = task[1].toLowerCase() === "x";
+				html.push(
+					`<li class="task-list-item"><input type="checkbox" disabled${checked ? " checked" : ""}>${renderInline(task[2])}</li>`,
+				);
+			} else {
+				html.push(`<li>${renderInline((ul || ol)[1])}</li>`);
+			}
 			continue;
 		}
 
@@ -1596,10 +1739,59 @@ function sanitizeHtml(html) {
 		}
 		[...el.attributes].forEach((attr) => {
 			const name = attr.name.toLowerCase();
-			if (name.startsWith("on")) el.removeAttribute(attr.name);
-			else if (name === "href" && /^\s*javascript:/i.test(attr.value))
+			if (name.startsWith("on")) {
+				el.removeAttribute(attr.name);
+				return;
+			}
+			// tag-aware attribute allow-list：不再给所有 tag 共用一套属性。
+			const tag = el.tagName;
+			if (tag === "IMG") {
+				const allowed =
+					name === "src" ||
+					name === "alt" ||
+					name === "title" ||
+					name === "loading" ||
+					name === "class" ||
+					name === "data-local-src";
+				if (allowed && name === "src" && !/^https?:\/\//i.test(attr.value)) {
+					// Markdown 原文中的 data:/javascript: 图片不直接信任
+					el.removeAttribute(attr.name);
+					return;
+				}
+				if (!allowed) el.removeAttribute(attr.name);
+				return;
+			}
+			if (tag === "INPUT") {
+				if (
+					name === "type" &&
+					attr.value.toLowerCase() !== "checkbox"
+				) {
+					el.removeAttribute(attr.name);
+					return;
+				}
+				if (
+					name === "checked" ||
+					name === "disabled" ||
+					name === "class"
+				) {
+					return; // 保留
+				}
+				el.removeAttribute(attr.name);
+				return;
+			}
+			if (tag === "TABLE" || tag === "TH" || tag === "TD") {
+				if (name !== "class") el.removeAttribute(attr.name);
+				return;
+			}
+			if (name === "href" && /^\s*javascript:/i.test(attr.value)) {
 				attr.value = "#";
-			else if (
+				return;
+			}
+			if (name === "href" && /^\s*data:/i.test(attr.value)) {
+				attr.value = "#";
+				return;
+			}
+			if (
 				name !== "href" &&
 				name !== "class" &&
 				name !== "target" &&
@@ -1674,6 +1866,58 @@ function preparePreviewLinks(root) {
 	linkifyPreviewText(root);
 }
 
+function previewImageCacheKey(markdownPath) {
+	return `${currentFile || ""}\u001f${markdownPath}`;
+}
+
+async function hydrateLocalPreviewImages(root) {
+	if (!currentFile) return;
+	const images = [...root.querySelectorAll("img[data-local-src]")];
+	if (!images.length) return;
+	const documentPath = currentFile;
+
+	// 同一次 render 内按 key 去重，避免同一图片重复 IPC
+	const pending = [];
+	const seen = new Set();
+	for (const img of images) {
+		const markdownPath = img.dataset.localSrc;
+		const cacheKey = previewImageCacheKey(markdownPath);
+		if (seen.has(cacheKey)) continue;
+		seen.add(cacheKey);
+		const cached = localImagePreviewCache.get(cacheKey);
+		if (cached) {
+			img.src = cached;
+			continue;
+		}
+		pending.push({ img, markdownPath, cacheKey });
+	}
+	if (!pending.length) return;
+
+	// 并发上限 4
+	let next = 0;
+	const worker = async () => {
+		while (next < pending.length) {
+			const job = pending[next];
+			next += 1;
+			try {
+				const dataUrl = await invoke("read_workspace_image_data_url", {
+					documentPath,
+					markdownPath: job.markdownPath,
+				});
+				localImagePreviewCache.set(job.cacheKey, dataUrl);
+				job.img.src = dataUrl;
+			} catch (error) {
+				console.warn("本地图片预览失败", job.markdownPath, error);
+			}
+		}
+	};
+	await Promise.all([worker(), worker(), worker(), worker()]);
+}
+
+function clearLocalImagePreviewCache() {
+	localImagePreviewCache.clear();
+}
+
 function updatePreview() {
 	if (previewTimer) {
 		clearTimeout(previewTimer);
@@ -1683,6 +1927,7 @@ function updatePreview() {
 	preparePreviewLinks(doc.body);
 	previewEl.replaceChildren(...doc.body.childNodes);
 	renderAnnotationAnchors();
+	void hydrateLocalPreviewImages(doc.body);
 }
 
 function schedulePreview() {
@@ -2175,10 +2420,7 @@ async function setSidebarMode(mode) {
 	workspaceTab.classList.toggle("active", !libraryMode && !workMode);
 	libraryTab.classList.toggle("active", libraryMode);
 	workTabRef.classList.toggle("active", workMode);
-	workspaceTab.setAttribute(
-		"aria-selected",
-		String(!libraryMode && !workMode),
-	);
+	workspaceTab.setAttribute("aria-selected", String(!libraryMode && !workMode));
 	libraryTab.setAttribute("aria-selected", String(libraryMode));
 	workTabRef.setAttribute("aria-selected", String(workMode));
 	addLibrarySourceButton.hidden = !libraryMode;
@@ -2198,6 +2440,7 @@ async function setSidebarMode(mode) {
 	renderCitationSummary();
 	stopWorkPolling();
 	setWorkSurface(workMode);
+	updateFormatToolbarState();
 	if (libraryMode) {
 		if (!librarySources.length) await refreshLibrary();
 		else renderLibraryHome();
@@ -2227,6 +2470,7 @@ async function useWorkspace(data) {
 		renderCitationSummary();
 		clearRelated();
 		clearWebSearch({ clearHistory: true });
+		clearLocalImagePreviewCache();
 	}
 	editor.readOnly = false;
 	editor.classList.remove("readonly");
@@ -2267,6 +2511,7 @@ async function chooseWorkspace() {
 		await setSidebarMode("workspace");
 		await useWorkspace(data);
 		loadAnnotationPanel();
+		updateFormatToolbarState();
 	} catch (error) {
 		console.error(error);
 		markError("目录打开失败");
@@ -2392,6 +2637,7 @@ async function openLibraryDocument(hit) {
 		loadViewModeForCurrentDocument();
 		await loadAnnotationPanel();
 		await loadWebSearchHistory();
+		updateFormatToolbarState();
 	} catch (error) {
 		console.error(error);
 		markError("资料打开失败");
@@ -2424,6 +2670,7 @@ function showDocument(path, name, text, row) {
 	loadAnnotationPanel();
 	scheduleRelatedRefresh(0);
 	void loadWebSearchHistory();
+	updateFormatToolbarState();
 }
 
 // ---------------------------------------------------------------------------
@@ -2513,7 +2760,8 @@ function renderWorkRow(record) {
 	head.append(badge, title, time);
 	const meta = document.createElement("span");
 	meta.className = "agent-work-meta";
-	meta.textContent = row.summary || (row.nextAction ? `下一步：${row.nextAction}` : "");
+	meta.textContent =
+		row.summary || (row.nextAction ? `下一步：${row.nextAction}` : "");
 	open.append(head, meta);
 	open.addEventListener("click", () => void openWorkDetail(record));
 	item.appendChild(open);
@@ -2597,8 +2845,9 @@ function renderWorkHomeCenter() {
 		ask.className = "primary-btn work-home-ask";
 		ask.textContent = "发起 Agent 工作";
 		ask.title = "与选区「问 Agent」相同的入口";
-		ask.addEventListener("click", () =>
-			void beginAgentQuestion(null, { allowEmpty: true }),
+		ask.addEventListener(
+			"click",
+			() => void beginAgentQuestion(null, { allowEmpty: true }),
 		);
 		workHome.appendChild(ask);
 	}
@@ -2657,10 +2906,7 @@ function renderWorkDetailView() {
 			? `（${detail.statusLine.reason}）`
 			: "";
 		body.appendChild(
-			workDetailSection(
-				"状态变化",
-				`${detail.statusLine.text}${reason}`,
-			),
+			workDetailSection("状态变化", `${detail.statusLine.text}${reason}`),
 		);
 	}
 	body.appendChild(
@@ -2677,7 +2923,10 @@ function renderWorkDetailView() {
 		link.className = "text-btn work-artifact-link";
 		link.textContent = "打开成果文档";
 		link.title = detail.artifact.uri;
-		link.addEventListener("click", () => void openWorkArtifact(detail.artifact.id));
+		link.addEventListener(
+			"click",
+			() => void openWorkArtifact(detail.artifact.id),
+		);
 		artifactValue.appendChild(link);
 	} else {
 		artifactValue.textContent = "尚无成果";
@@ -2685,11 +2934,7 @@ function renderWorkDetailView() {
 	}
 	body.appendChild(workDetailSection("成果", null, artifactValue));
 	body.appendChild(
-		workDetailSection(
-			"证据",
-			null,
-			workEvidenceSummaryNode(detail),
-		),
+		workDetailSection("证据", null, workEvidenceSummaryNode(detail)),
 	);
 
 	workDetail.append(back, head, actions, body);
@@ -3137,6 +3382,7 @@ function showAgentDocument(data) {
 	void loadWebSearchHistory();
 	loadViewModeForCurrentDocument();
 	if (workMode && legacyAgentView) renderAgentWorks();
+	updateFormatToolbarState();
 }
 
 async function createFile(relativePath) {
@@ -3607,7 +3853,9 @@ async function submitAgentQuestion(event) {
 		if (workMode && legacyAgentView) renderAgentWorks();
 		if (workMode) void loadWorks();
 		markError(
-			agentCancelRequested ? "Agent 已停止" : `Agent 失败：${shortAgentError(error)}`,
+			agentCancelRequested
+				? "Agent 已停止"
+				: `Agent 失败：${shortAgentError(error)}`,
 		);
 		void loadHistoricAgentFailures();
 	} finally {
@@ -3939,7 +4187,8 @@ async function openSettings() {
 async function saveSettings() {
 	const key = braveApiKeyInput.value.trim();
 	if (!key) {
-		braveApiKeyStatus.textContent = "请输入 API Key；不修改请取消，移除请点击清除";
+		braveApiKeyStatus.textContent =
+			"请输入 API Key；不修改请取消，移除请点击清除";
 		braveApiKeyInput.focus();
 		return;
 	}
@@ -4086,6 +4335,208 @@ function setAnnotateVisible(visible) {
 	updateRightPanelHandle();
 	if (visible && annotateLoadedDoc !== documentRefKey()) loadAnnotationPanel();
 }
+
+// ---------------------------------------------------------------------------
+// 文档格式工具栏：第二行格式条 + 标题菜单 + 快捷键 + 本地图片预览水合。
+// Markdown 变换逻辑全部在 markdown-formatting.js；这里只做 orchestration。
+// ---------------------------------------------------------------------------
+
+let headingMenuOpen = false;
+const localImagePreviewCache = new Map();
+const MAX_LOCAL_IMAGE_BYTES = 15 * 1024 * 1024;
+
+/// 判断当前文档是否允许正文格式变换（Workspace 或 Agent Work 的可编辑正文）。
+function formatEditableContext() {
+	if (currentLibraryDocument) return false;
+	if (!editor) return false;
+	if (editor.readOnly) return false;
+	if (!currentFile && !currentAgentDocument) return false;
+	if (viewMode === "reader") return false; // 仅阅读模式：正文变换禁用
+	return true;
+}
+
+/// Workspace 可上传本地图片；Agent Work 的 AppData 正文 v0.1 不建 asset store。
+function canUploadWorkspaceImage() {
+	return Boolean(currentFile && !currentLibraryDocument && !currentAgentDocument);
+}
+
+function updateFormatToolbarState() {
+	const editable = formatEditableContext();
+	const upload = canUploadWorkspaceImage();
+	// Library / Work 浏览模式下即使上次文档引用残留，格式栏也整体禁用
+	const browsingInactive = libraryMode || workMode;
+	const hidden =
+		!currentFile && !currentLibraryDocument && !currentAgentDocument;
+	formatToolbar.hidden = hidden;
+	shell.dataset.formatToolbar = hidden ? "hidden" : "shown";
+	if (hidden) {
+		closeHeadingMenu();
+		return;
+	}
+	const writeCommands = [
+		"bold",
+		"italic",
+		"strikethrough",
+		"heading",
+		"code",
+		"quote",
+		"list",
+		"ordered-list",
+		"check-list",
+		"link",
+		"image",
+		"upload-image",
+		"table",
+		"hr",
+	];
+	for (const command of writeCommands) {
+		const btn = formatButtons.get(command);
+		if (!btn) continue;
+		if (command === "upload-image") {
+			btn.disabled = !upload || browsingInactive;
+		} else {
+			btn.disabled = !editable || browsingInactive;
+		}
+	}
+	// comment 始终可用（复用现有 Annotation 流程）
+	const commentBtn = formatButtons.get("comment");
+	if (commentBtn) commentBtn.disabled = false;
+}
+
+function textareaSelection() {
+	return { selectionStart: editor.selectionStart, selectionEnd: editor.selectionEnd };
+}
+
+function restoreEditorSelection(selectionStart, selectionEnd) {
+	editor.focus();
+	editor.setSelectionRange(selectionStart, selectionEnd);
+}
+
+function onEditorContentChanged() {
+	schedulePreview();
+	markDirty();
+	scheduleSave();
+	if (isWorkspaceDocumentForRelated()) scheduleRelatedRefresh();
+	setTimeout(showEditorSelectionAction);
+}
+
+function applyEditorResult(result) {
+	editor.value = result.value;
+	restoreEditorSelection(result.selectionStart, result.selectionEnd);
+	onEditorContentChanged();
+}
+
+function applyFormatCommand(command, options = {}) {
+	if (command === "comment") {
+		void beginAnnotation();
+		return;
+	}
+	if (command === "upload-image") {
+		void uploadWorkspaceImage();
+		return;
+	}
+	if (!formatEditableContext() && command !== "heading") return;
+	const result = window.StillwriteMarkdownFormatting.applyCommand({
+		value: editor.value,
+		selectionStart: editor.selectionStart,
+		selectionEnd: editor.selectionEnd,
+		command,
+		options,
+	});
+	if (!result || result.value === editor.value && command !== "heading") return;
+	applyEditorResult(result);
+}
+
+async function uploadWorkspaceImage() {
+	if (!canUploadWorkspaceImage()) return;
+	try {
+		const imported = await invoke("import_workspace_image", {
+			documentPath: currentFile,
+		});
+		if (!imported) return; // 用户取消选择
+		const result = window.StillwriteMarkdownFormatting.applyCommand({
+			value: editor.value,
+			selectionStart: editor.selectionStart,
+			selectionEnd: editor.selectionEnd,
+			command: "image-upload",
+			options: { alt: imported.alt, markdownPath: imported.markdown_path },
+		});
+		if (!result) return;
+		applyEditorResult(result);
+	} catch (error) {
+		console.warn("上传图片失败", error);
+		markError(String(error));
+	}
+}
+
+// ---------- 标题菜单 ----------
+
+function openHeadingMenu() {
+	headingMenuOpen = true;
+	headingMenu.hidden = false;
+	headingButton.classList.add("active");
+	updateHeadingMenuHighlight();
+}
+
+function closeHeadingMenu() {
+	headingMenuOpen = false;
+	headingMenu.hidden = true;
+	headingButton.classList.remove("active");
+}
+
+function toggleHeadingMenu() {
+	if (headingMenuOpen) closeHeadingMenu();
+	else openHeadingMenu();
+}
+
+function currentLineHeadingLevel() {
+	const start = editor.selectionStart;
+	const lineStart = editor.value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+	const line = editor.value.slice(lineStart, editor.value.indexOf("\n", start) === -1 ? undefined : editor.value.indexOf("\n", start));
+	const match = line.match(/^\s{0,3}(#{1,6})\s+/);
+	return match ? match[1].length : 0;
+}
+
+function updateHeadingMenuHighlight() {
+	const level = currentLineHeadingLevel();
+	headingMenu.querySelectorAll("[data-heading-level]").forEach((btn) => {
+		btn.classList.toggle(
+			"active",
+			Number(btn.dataset.headingLevel) === level,
+		);
+	});
+}
+
+function handleHeadingLevel(level) {
+	closeHeadingMenu();
+	if (!formatEditableContext()) return;
+	applyFormatCommand("heading", { level });
+}
+
+formatToolbar.addEventListener("click", (event) => {
+	const button = event.target.closest(".format-btn");
+	if (!button) return;
+	const command = button.dataset.formatCommand;
+	if (command === "heading") {
+		toggleHeadingMenu();
+		return;
+	}
+	closeHeadingMenu();
+	applyFormatCommand(command);
+});
+
+headingMenu.addEventListener("click", (event) => {
+	const button = event.target.closest("[data-heading-level]");
+	if (!button) return;
+	handleHeadingLevel(Number(button.dataset.headingLevel));
+});
+
+document.addEventListener("pointerdown", (event) => {
+	if (headingMenuOpen && !event.target.closest("#headingMenu, [data-format-command=\"heading\"]")) {
+		closeHeadingMenu();
+	}
+});
+
 
 function clearWebSearch({ resetView = true, clearHistory = false } = {}) {
 	webSearchRequestToken += 1;
@@ -4287,8 +4738,9 @@ function renderWebSearchResultCard(result) {
 	} catch (_) {}
 	meta.textContent = result.age ? `${host} · ${result.age}` : host;
 	link.append(title, description, meta);
-	link.addEventListener("click", (event) =>
-		void openWebSearchUrl(result.url, event),
+	link.addEventListener(
+		"click",
+		(event) => void openWebSearchUrl(result.url, event),
 	);
 	card.appendChild(link);
 
@@ -4524,6 +4976,7 @@ function setViewMode(mode) {
 	// 兼容旧默认：新文档未显式选择前的回退值
 	localStorage.setItem("stillwrite.viewMode", mode);
 	applyLayout();
+	updateFormatToolbarState();
 }
 
 function setSidebarVisible(visible) {
@@ -4597,13 +5050,7 @@ bindResize(
 	() => localStorage.setItem("stillwrite.annotateWidth", String(annotateWidth)),
 );
 
-editor.addEventListener("input", () => {
-	schedulePreview();
-	markDirty();
-	scheduleSave();
-	if (isWorkspaceDocumentForRelated()) scheduleRelatedRefresh();
-	setTimeout(showEditorSelectionAction);
-});
+editor.addEventListener("input", onEditorContentChanged);
 
 editor.addEventListener("select", () => setTimeout(showEditorSelectionAction));
 
@@ -4615,6 +5062,33 @@ editor.addEventListener("keydown", (event) => {
 		const end = editor.selectionEnd;
 		editor.setRangeText("  ", start, end, "end");
 		editor.dispatchEvent(new Event("input"));
+		return;
+	}
+	const mod = event.ctrlKey || event.metaKey;
+	if (!mod) return;
+	const key = event.key.toLowerCase();
+	if (key === "b") {
+		event.preventDefault();
+		if (event.shiftKey) {
+			setSidebarVisible(!sidebarVisible);
+		} else {
+			applyFormatCommand("bold");
+		}
+		return;
+	}
+	if (key === "i") {
+		event.preventDefault();
+		applyFormatCommand("italic");
+		return;
+	}
+	if (key === "k") {
+		event.preventDefault();
+		applyFormatCommand("link");
+		return;
+	}
+	if (event.altKey && /^[1-6]$/.test(event.key)) {
+		event.preventDefault();
+		applyFormatCommand("heading", { level: Number(event.key) });
 	}
 });
 
@@ -4628,9 +5102,16 @@ document.querySelector("#refreshTree").addEventListener("click", refreshTree);
 workspaceTab.addEventListener("click", () => void setSidebarMode("workspace"));
 libraryTab.addEventListener("click", () => void setSidebarMode("library"));
 workTabRef.addEventListener("click", () => void setSidebarMode("work"));
-legacyAgentWorksToggle.addEventListener("click", () => void toggleLegacyAgentWorks());
-workContextViewButton.addEventListener("click", () => setSupportView("work-context"));
-workEvidenceViewButton.addEventListener("click", () => setSupportView("work-evidence"));
+legacyAgentWorksToggle.addEventListener(
+	"click",
+	() => void toggleLegacyAgentWorks(),
+);
+workContextViewButton.addEventListener("click", () =>
+	setSupportView("work-context"),
+);
+workEvidenceViewButton.addEventListener("click", () =>
+	setSupportView("work-evidence"),
+);
 addLibrarySourceButton.addEventListener("click", () => {
 	setSourceMenuOpen(sourceMenu.hidden);
 });
@@ -4825,11 +5306,18 @@ document.querySelector("#cancelNewFile").addEventListener("click", () => {
 });
 
 window.addEventListener("keydown", (event) => {
-	if (event.key === "Escape" && !fileMenu.hidden) {
-		event.preventDefault();
-		setFileMenuOpen(false);
-		fileMenuButton.focus();
-		return;
+	if (event.key === "Escape") {
+		if (headingMenuOpen) {
+			event.preventDefault();
+			closeHeadingMenu();
+			return;
+		}
+		if (!fileMenu.hidden) {
+			event.preventDefault();
+			setFileMenuOpen(false);
+			fileMenuButton.focus();
+			return;
+		}
 	}
 	const mod = event.ctrlKey || event.metaKey;
 	if (!mod) return;
@@ -4853,27 +5341,30 @@ window.addEventListener("keydown", (event) => {
 	}
 	if (key === "b") {
 		event.preventDefault();
+		// 编辑器聚焦时 Ctrl+B/Ctrl+Shift+B 由编辑器 keydown 处理（粗体/侧栏）
+		if (document.activeElement === editor) return;
 		setSidebarVisible(!sidebarVisible);
 	}
 	if (key === "m" && event.shiftKey) {
 		event.preventDefault();
 		beginAnnotation();
 	}
-	if (key === "1") {
+	if (!event.altKey && key === "1") {
 		event.preventDefault();
 		setViewMode("editor");
 	}
-	if (key === "2") {
+	if (!event.altKey && key === "2") {
 		event.preventDefault();
 		setViewMode("split");
 	}
-	if (key === "3") {
+	if (!event.altKey && key === "3") {
 		event.preventDefault();
 		setViewMode("reader");
 	}
 });
 
 applyLayout();
+updateFormatToolbarState();
 void installAgentEventListener().catch((error) => {
 	console.warn("Cannot subscribe to Agent events", error);
 });

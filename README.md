@@ -136,7 +136,7 @@ provider、模型和认证在 Pi 外部配置，StillWrite 不保存凭据。必
 
 - 在可编辑的 Workspace Markdown 文档中写下标题或开头后，StillWrite 会从 H1、文件名和（标题信号不足时的）首段提取 3–6 个关键词/短语，分别检索 Workspace / Library，并按多关键词共现、短语命中和标题命中重排，最多展示 5 条材料。
 - 关联使用独立的 trigram 侧车索引；普通手工搜索仍保留原有 unicode61 语义，二字中文关键词另有正文 LIKE 兜底。
-- 结果出现在右侧支持栏的 `关联` 视图，分类为 `过去的批注`、`工作区` 和 `资料`；普通后台刷新不自动打开面板、不抢焦点、不改写正文，点击结果后才打开原始材料。
+- 结果出现在右侧支持栏的 `关联` 视图，分类为 `过去的批注`、`工作区` 和 `资料`；普通后台刷新不自动打开面板、不抢焦点、不改写正文，点击结果后才打开原始材料。当前文档、它自己的批注侧车（`批注/<相对路径>`）与 `批注汇总.md` 永不进入自己的关联结果；`# Untitled` / `未命名` 等占位标题不产生检索意图。
 - 在写作区或阅读区选中字句/段落后，浮层提供 `批注`、`问 Agent`、`联网搜索` 和 `＋关联`；`联网搜索` 会把选区交给 Rust 后端调用 Brave Search API，并在侧栏展示网页结果，`＋关联` 会把选区作为当前作品的临时检索补充，最多保留最近 3 个选区。
 - `联网搜索` 默认使用左下角“设置”中保存的 Brave API Key；未保存时回退到环境变量 `BRAVE_SEARCH_API_KEY`（兼容 `BRAVE_API_KEY`）。密钥由 Rust 后端管理，不进入前端、Markdown 或 Workspace SQLite。
 - 每张关联卡片都可以在 `引用` 旁点击 `☆ 固定`；固定卡片会保存到本机、优先显示，并且不受关联结果 Top 5 限制。固定状态按 Workspace 保存，不写入 Markdown 或 git。
@@ -154,6 +154,18 @@ RSS 只是一个 **Library 输入适配器**，不是第四个顶层平面，也
 - `rss-sources.json` 只保存用户订阅（id / name / url）；ETag、上次抓取时间、错误等派生状态在 `rss-fetch-state.json`，删除后只导致下一次完整抓取，不丢订阅。删除源会删除本地 Markdown 缓存并刷新索引，但**保留**已有批注。
 - 手动刷新是主路径；打开 `资料` 面板时若距上次全局刷新超过 30 分钟，会在后台静默触发一次。
 - **不做**：网页全文抓取 / headless browser、EPUB / Kindle 导出、已读未读、定时 daemon、RSS 专属数据库、RSS 专属批注或 Agent 管线。summary-only feed 的影响留待真实使用数据再决定是否引入正文提取。
+
+## v0.8 原型：文档格式工具栏（本分支新增）
+
+顶栏之下新增一条 40px 文档格式栏（`format-toolbar`），降低 Markdown 输入摩擦，不引入富文本编辑器：
+
+- 15 个按钮按顺序排列：粗体 / 斜体 / 删除线 / 标题 / 代码 / 引用 / 无序列表 / 有序列表 / 任务列表 / 链接 / 网络图片 / 上传本地图片 / 表格 / 分割线 / 批注；纯前端变换逻辑在 `ui/markdown-formatting.js`（selection-based、可撤销、不建新状态）。
+- `标题` 按钮打开轻量菜单（正文 / H1–H6）；无选区时插入并选中 placeholder，已有标记时 toggle 移除；多行选区逐行处理。
+- `批注` 复用现有 Annotation 流程（有选区进选区批注，无选区切换/打开批注栏），不新增批注 schema。
+- 快捷键：编辑器聚焦时 `Ctrl/Cmd+B` 粗体、`Ctrl/Cmd+I` 斜体、`Ctrl/Cmd+K` 链接、`Ctrl/Cmd+Alt+1–6` 设置标题；侧栏切换改为 `Ctrl/Cmd+Shift+B`。
+- 上传本地图片（仅 Workspace）：Rust 后端 `import_workspace_image` 用原生 picker 选图（png/jpg/jpeg/webp/gif，≤15 MiB），原子复制到**当前 Markdown 同目录** `assets/`（重名自动 `-2`、`-3` 后缀，不覆盖），正文写入可携带的相对路径 `![alt](assets/x.png)`；预览经受限 Rust 命令 `read_workspace_image_data_url` 转 `data:image/...;base64` 后水合，路径逃逸 / 符号链接 / 超限一律拒绝。Agent Work 与 Library 不上传本地图片。
+- 格式栏状态随文档类型切换：Workspace 全功能；Agent Work 禁用上传；Library / 仅阅读模式 / 未打开文档时正文变换按钮禁用或整栏隐藏；`批注` 始终可用。
+- 阅读区扩展：任务列表（`- [ ]` / `- [x]`，checkbox 只读）、Markdown 图片（远程直接显示、本地经后端 data URL 水合）、GFM 管道表格（含对齐 `:---` 语法）；sanitizer 改为 tag-aware 属性白名单，原文中的 `data:` / `javascript:` 图片与事件属性一律不放行。
 
 ## vNext Foundation：统一维护基线
 
@@ -194,7 +206,11 @@ Work 重构前必须遵守四个兼容接缝：
 | Ctrl/Cmd + N | 新建 Markdown |
 | Ctrl/Cmd + S | 立即保存 |
 | Ctrl/Cmd + R | 刷新目录 |
-| Ctrl/Cmd + B | 显示/隐藏文件栏 |
+| Ctrl/Cmd + B | 编辑器聚焦：粗体；其他位置：显示/隐藏文件栏 |
+| Ctrl/Cmd + Shift + B | 显示/隐藏文件栏 |
+| Ctrl/Cmd + I | 斜体 |
+| Ctrl/Cmd + K | 插入链接 |
+| Ctrl/Cmd + Alt + 1–6 | 设置 H1–H6 |
 | Ctrl/Cmd + Shift + M | 新建字句/段落批注 |
 | Ctrl/Cmd + 1 | 仅写作 |
 | Ctrl/Cmd + 2 | 双栏 |
@@ -279,8 +295,11 @@ stillwrite/
 │   ├── document-links.test.js # 内外链接识别与相对路径解析测试
 │   ├── agent-events.js # Agent 流式事件归约（运行态，不落盘）
 │   ├── agent-events.test.js # Agent 事件归约测试
-│   ├── app.js          # 文件树、Library、搜索、关联、引用篮、同步、预览、布局、批注
-│   └── style.css       # 沉浸式双栏视觉 + 批注栏 + 资料库
+│   ├── markdown-formatting.js # 文档格式栏的纯 Markdown 变换（selection-based，无 DOM 依赖）
+│   ├── markdown-formatting.test.js # 格式命令矩阵与选区正确性测试
+│   ├── renderer-helpers.test.js # 阅读区 table/图片 renderer 纯函数测试
+│   ├── app.js          # 文件树、Library、搜索、关联、引用篮、同步、预览、布局、批注、格式栏接线
+│   └── style.css       # 沉浸式双栏视觉 + 批注栏 + 资料库 + 格式工具栏
 └── src-tauri/
     ├── src/lib.rs      # 文件夹/文档选择 + 工作区边界 + 文件读写 + Tauri command 注册
     ├── src/annotate.rs # 批注侧车：读写 `批注/`（标注来源/时间）+ 汇总 `批注汇总.md`

@@ -811,18 +811,33 @@ fn transition_run_work(
         work::transition_work(&mut conn, &record.id, to, actor, reason).map(|_| ())
     })();
     if let Err(error) = result {
-        eprintln!("推进 Work 状态失败 (run {run_id} → {}): {error}", to.as_str());
+        eprintln!(
+            "推进 Work 状态失败 (run {run_id} → {}): {error}",
+            to.as_str()
+        );
     }
 }
 
 /// abort 语义的 Work 取消（用户停止 / 切换工作区中止）。
 pub(crate) fn cancel_run_work(app: &AppHandle, run_id: &str, reason: &str) {
-    transition_run_work(app, run_id, WorkStatus::Cancelled, ActorKind::Human, Some(reason));
+    transition_run_work(
+        app,
+        run_id,
+        WorkStatus::Cancelled,
+        ActorKind::Human,
+        Some(reason),
+    );
 }
 
 /// 运行期致命错误（Pi 进程死亡 / 扩展报错）→ Work failed。
 fn fail_run_work(app: &AppHandle, run_id: &str, reason: &str) {
-    transition_run_work(app, run_id, WorkStatus::Failed, ActorKind::Agent, Some(reason));
+    transition_run_work(
+        app,
+        run_id,
+        WorkStatus::Failed,
+        ActorKind::Agent,
+        Some(reason),
+    );
 }
 
 /// Work 视图的取消入口：该 Work 的 run 正在 Pi 上运行时先走 abort 核心
@@ -834,7 +849,8 @@ pub fn cancel_work(
     work_id: &str,
 ) -> Result<work::WorkRecord, String> {
     let mut conn = crate::open_durable_state(app)?;
-    let record = work::get_work(&conn, work_id)?.ok_or_else(|| format!("Work 不存在: {work_id}"))?;
+    let record =
+        work::get_work(&conn, work_id)?.ok_or_else(|| format!("Work 不存在: {work_id}"))?;
     let running = record
         .receipt_ref
         .as_deref()

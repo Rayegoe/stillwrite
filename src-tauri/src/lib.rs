@@ -646,6 +646,217 @@ async fn create_markdown(
     Ok(target.to_string_lossy().to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Workspace 本地图片：上传（picker + 安全复制）与 preview data URL 读取。
+// 图片是携带的人类 Artifact：落在 <markdown 同目录>/assets/，不写 SQLite。
+// ---------------------------------------------------------------------------
+
+const MAX_WORKSPACE_IMAGE_BYTES: u64 = 15 * 1024 * 1024;
+
+#[derive(Serialize)]
+struct ImportedImage {
+    markdown_path: String,
+    alt: String,
+    mime: String,
+    byte_len: u64,
+}
+
+fn image_mime_by_extension(path: &Path) -> Option<&'static str> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+/// 图片目标文件名：为避免 Markdown 内路径含空格，把空格替换为 `-`。
+fn image_target_file_name(name: &str) -> String {
+    name.trim()
+        .replace(' ', "-")
+        .replace('\t', "-")
+        .replace('\u{00a0}', "-")
+}
+
+/// 在 assets/ 目录内寻找不冲突的目标文件名：photo.png → photo-2.png → …
+fn unique_image_target(assets_dir: &Path, requested: &str) -> String {
+    if !assets_dir.join(&requested).exists() {
+        return requested.to_string();
+    }
+    let stem = Path::new(&requested)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".to_string());
+    let ext = Path::new(&requested)
+        .extension()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "png".to_string());
+    for index in 2..=9999 {
+        let candidate = format!("{stem}-{index}.{ext}");
+        if !assets_dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!(
+        "{stem}-{}.{ext}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    )
+}
+
+/// 原子复制：同目录临时文件 + fsync + rename；失败时清理 temp。
+fn atomic_copy_image(source: &Path, target: &Path) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| "图片目标路径无效".to_string())?;
+    let file_name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .ok_or_else(|| "图片目标文件名无效".to_string())?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = parent.join(format!(".{file_name}.{}.{nonce}.tmp", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        let mut src = fs::File::open(source)?;
+        let mut dst = fs::File::create(&tmp_path)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.sync_all()?;
+        fs::rename(&tmp_path, target)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("图片复制失败: {error}"));
+    }
+    Ok(())
+}
+
+/// 挑选 Workspace 文档旁边的 assets/ 目标目录；拒绝逃逸 Workspace。
+fn workspace_assets_dir(document: &Path, state: &State<AppState>) -> Result<PathBuf, String> {
+    let root = workspace_root(state)?;
+    let document = ensure_existing_path_inside_workspace(&document.to_string_lossy(), state)?;
+    if !is_markdown(&document) {
+        return Err("图片只能挂在 Markdown 文档旁边".into());
+    }
+    let parent = document
+        .parent()
+        .ok_or_else(|| "文档路径无效".to_string())?;
+    let assets = parent.join("assets");
+    create_dir_all_inside(&root, &assets)?;
+    Ok(assets)
+}
+
+/// 上传图片：native picker → 校验 → 原子复制进 <md 目录>/assets/。
+/// 用户取消返回 Ok(None)；失败返回 Err。
+#[tauri::command]
+async fn import_workspace_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    document_path: String,
+) -> Result<Option<ImportedImage>, String> {
+    let assets_dir = workspace_assets_dir(Path::new(&document_path), &state)?;
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("选择图片")
+        .add_filter("图片", &["png", "jpg", "jpeg", "webp", "gif"])
+        .blocking_pick_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let source = selected
+        .into_path()
+        .map_err(|e| format!("图片路径不可用: {e}"))?;
+    let mime = image_mime_by_extension(&source)
+        .ok_or_else(|| "仅支持 png / jpg / jpeg / webp / gif 图片".to_string())?
+        .to_string();
+    let meta = fs::metadata(&source).map_err(|e| format!("读取图片信息失败: {e}"))?;
+    let byte_len = meta.len();
+    if byte_len > MAX_WORKSPACE_IMAGE_BYTES {
+        return Err("图片超过 15 MiB，请先压缩后再导入".into());
+    }
+    let raw_name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image.png".to_string());
+    let file_name = image_target_file_name(&raw_name);
+    let target_name = unique_image_target(&assets_dir, &file_name);
+    let target = assets_dir.join(&target_name);
+    atomic_copy_image(&source, &target)?;
+    let alt = Path::new(&target_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".to_string());
+    Ok(Some(ImportedImage {
+        markdown_path: format!("assets/{target_name}"),
+        alt,
+        mime,
+        byte_len,
+    }))
+}
+
+/// 校验预览用 markdown 图片路径：相对、无 `..`、位于文档父目录内、
+/// 规范化后仍在 Workspace 内、扩展名受支持、大小 <= 15 MiB。
+fn validate_local_image_path(
+    document: &Path,
+    markdown_path: &str,
+    state: &State<AppState>,
+) -> Result<PathBuf, String> {
+    if markdown_path.trim().is_empty() {
+        return Err("图片路径为空".into());
+    }
+    let rel = Path::new(markdown_path.trim());
+    if rel.is_absolute() {
+        return Err("不支持绝对图片路径".into());
+    }
+    if rel.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err("图片路径包含不允许的路径段".into());
+    }
+    let document = ensure_existing_path_inside_workspace(&document.to_string_lossy(), state)?;
+    let root = workspace_root(state)?;
+    let parent = document
+        .parent()
+        .ok_or_else(|| "文档路径无效".to_string())?;
+    let joined = parent.join(rel);
+    let canonical = fs::canonicalize(&joined).map_err(|e| format!("图片不存在或不可读: {e}"))?;
+    if !canonical.starts_with(&root) {
+        return Err("拒绝访问工作区以外的图片".into());
+    }
+    if image_mime_by_extension(&canonical).is_none() {
+        return Err("仅支持 png / jpg / jpeg / webp / gif 图片".into());
+    }
+    let meta = fs::metadata(&canonical).map_err(|e| format!("读取图片失败: {e}"))?;
+    if meta.len() > MAX_WORKSPACE_IMAGE_BYTES {
+        return Err("图片超过 15 MiB，无法预览".into());
+    }
+    Ok(canonical)
+}
+
+/// 本地图片 preview data URL：`data:<mime>;base64,<payload>`。
+#[tauri::command]
+async fn read_workspace_image_data_url(
+    state: State<'_, AppState>,
+    document_path: String,
+    markdown_path: String,
+) -> Result<String, String> {
+    let canonical = validate_local_image_path(Path::new(&document_path), &markdown_path, &state)?;
+    let mime = image_mime_by_extension(&canonical).unwrap_or("image/png");
+    let bytes = fs::read(&canonical).map_err(|e| format!("读取图片失败: {e}"))?;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
+    ))
+}
+
 #[tauri::command]
 async fn rebuild_index(
     app: AppHandle,
@@ -1372,7 +1583,10 @@ struct WorkReceiptProbe {
 /// 运行收据存在性探针：只报告 receipt 文件是否存在与所在路径，
 /// 不解析内容（receipt 本体由 Pi runtime 留存）。
 #[tauri::command]
-async fn work_receipt_probe(app: AppHandle, receipt_ref: String) -> Result<WorkReceiptProbe, String> {
+async fn work_receipt_probe(
+    app: AppHandle,
+    receipt_ref: String,
+) -> Result<WorkReceiptProbe, String> {
     match pi_agent::receipt_path(&app, receipt_ref.trim())? {
         Some(path) => Ok(WorkReceiptProbe {
             exists: path.is_file(),
@@ -1543,6 +1757,8 @@ pub fn run() {
             read_markdown,
             write_markdown,
             create_markdown,
+            import_workspace_image,
+            read_workspace_image_data_url,
             rebuild_index,
             search_index,
             brave_api_key_status,
@@ -1819,5 +2035,164 @@ mod tests {
         assert!(create_new_markdown(&root, Path::new("/abs.md")).is_err());
         assert!(create_new_markdown(&root, Path::new("note.txt")).is_err());
         assert!(create_new_markdown(&root, Path::new("existing.md")).is_err());
+    }
+
+    // ---- 工作区本地图片（import/read 纯逻辑部分） ----
+
+    #[test]
+    fn image_mime_maps_supported_extensions() {
+        assert_eq!(
+            image_mime_by_extension(Path::new("a.png")),
+            Some("image/png")
+        );
+        assert_eq!(
+            image_mime_by_extension(Path::new("a.jpg")),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            image_mime_by_extension(Path::new("a.jpeg")),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            image_mime_by_extension(Path::new("a.webp")),
+            Some("image/webp")
+        );
+        assert_eq!(
+            image_mime_by_extension(Path::new("a.gif")),
+            Some("image/gif")
+        );
+        assert_eq!(image_mime_by_extension(Path::new("a.svg")), None);
+        assert_eq!(
+            image_mime_by_extension(Path::new("a.PNG")),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn image_target_file_name_sanitizes_spaces() {
+        assert_eq!(image_target_file_name("photo.png"), "photo.png");
+        assert_eq!(image_target_file_name("my photo.png"), "my-photo.png");
+        assert_eq!(image_target_file_name("  a  b.png "), "a--b.png");
+    }
+
+    #[test]
+    fn unique_image_target_never_overwrites() {
+        let dir = temp_dir("img-collision");
+        fs::write(dir.join("photo.png"), "1").unwrap();
+        fs::write(dir.join("photo-2.png"), "2").unwrap();
+        let first = unique_image_target(&dir, "photo.png");
+        assert_eq!(first, "photo-3.png");
+        let second = unique_image_target(&dir, "photo.png");
+        assert_eq!(second, "photo-3.png"); // 未落盘就不会变化
+        fs::write(dir.join("photo-3.png"), "3").unwrap();
+        assert_eq!(unique_image_target(&dir, "photo.png"), "photo-4.png");
+    }
+
+    #[test]
+    fn atomic_copy_image_creates_identical_target() {
+        let dir = temp_dir("img-copy");
+        let source = dir.join("src.png");
+        fs::write(&source, b"\x89PNG\r\n\x1a\n1234567890").unwrap();
+        let target = dir.join("assets").join("dst.png");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        atomic_copy_image(&source, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), fs::read(&source).unwrap());
+        // 不应残留临时文件
+        let leftovers: Vec<_> = fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn read_workspace_image_validation_rejects_bad_paths() {
+        // 纯路径约束（不经过 State 的路径段检查）：
+        assert!(Path::new("../secret.png").is_relative());
+        assert!(Path::new("../secret.png")
+            .components()
+            .any(|c| matches!(c, Component::ParentDir)));
+        assert!(Path::new("/abs/secret.png").is_absolute());
+        assert!(Path::new("assets/ok.png").is_relative());
+        assert!(Path::new("a/../../evil.png")
+            .components()
+            .any(|c| matches!(c, Component::ParentDir)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_workspace_image_validation_rejects_symlink_escape() {
+        let root = temp_dir("img-symlink");
+        let outside = temp_dir("img-symlink-out");
+        fs::write(outside.join("evil.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        fs::write(root.join("doc.md"), "# d").unwrap();
+        fs::create_dir_all(root.join("assets")).unwrap();
+        std::os::unix::fs::symlink(outside.join("evil.png"), root.join("assets/link.png")).unwrap();
+        // 规范化后位于 Workspace 外 → 拒绝
+        let canonical = fs::canonicalize(root.join("assets/link.png")).unwrap();
+        assert!(!canonical.starts_with(&root));
+    }
+
+    #[test]
+    fn workspace_assets_dir_contains_assets_sibling_of_markdown() {
+        // 纯路径约束：assets 必须与 Markdown 同级
+        let doc = Path::new("/ws/docs/ch01.md");
+        let _parent = doc.parent().unwrap().join("assets");
+        assert_eq!(
+            doc.parent().unwrap().join("assets"),
+            Path::new("/ws/docs/assets")
+        );
+    }
+
+    #[test]
+    fn image_size_limit_is_15_mib_constant() {
+        // import 与 read 两条路径共用同一上限常量
+        assert_eq!(MAX_WORKSPACE_IMAGE_BYTES, 15 * 1024 * 1024);
+        // 恰好等于上限的载荷被允许（> 才拒绝），边界语义与 spec 一致
+        let at_limit = MAX_WORKSPACE_IMAGE_BYTES;
+        assert!(!(at_limit > MAX_WORKSPACE_IMAGE_BYTES));
+        assert!(at_limit + 1 > MAX_WORKSPACE_IMAGE_BYTES);
+    }
+
+    #[test]
+    fn image_import_chain_copies_into_sibling_assets_and_reads_back() {
+        // 模拟完整后端链路（不经过 Tauri AppHandle/State）：
+        // picker 源 → 目标 assets 目录 → 唯一名 → 原子复制 → data URL 编码。
+        let root = temp_dir("img-chain");
+        let docs = root.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        fs::write(docs.join("ch01.md"), "# c").unwrap();
+        let assets = docs.join("assets");
+        fs::create_dir_all(&assets).unwrap();
+
+        let source = root.join("outside-photo.png");
+        let payload: Vec<u8> = (0..64).map(|i| (i % 251) as u8).collect();
+        fs::write(&source, &payload).unwrap();
+
+        let requested = image_target_file_name("outside photo.png");
+        assert_eq!(requested, "outside-photo.png");
+        let target_name = unique_image_target(&assets, &requested);
+        atomic_copy_image(&source, &assets.join(&target_name)).unwrap();
+        assert_eq!(fs::read(assets.join(&target_name)).unwrap(), payload);
+
+        // 同一源再导入一次 → 不覆盖，生成 -2 后缀
+        let second = unique_image_target(&assets, &requested);
+        assert_eq!(second, "outside-photo-2.png");
+
+        // 读回 data URL（手动走 mime + base64，与命令相同的公式）
+        let mime = image_mime_by_extension(Path::new(&target_name)).unwrap();
+        let bytes = fs::read(assets.join(&target_name)).unwrap();
+        let data_url = format!(
+            "data:{mime};base64,{}",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
+        );
+        assert!(data_url.starts_with("data:image/png;base64,"));
+        let decoded = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            data_url.trim_start_matches("data:image/png;base64,"),
+        )
+        .unwrap();
+        assert_eq!(decoded, payload);
     }
 }

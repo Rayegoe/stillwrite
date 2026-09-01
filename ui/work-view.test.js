@@ -43,7 +43,11 @@ test("groupWorks buckets the seven statuses into the three fixed groups", () => 
 	);
 	assert.deepEqual(
 		groups.map((group) => group.items.map((item) => item.id)),
-		[["b", "d"], ["a", "g"], ["c", "e", "f"]],
+		[
+			["b", "d"],
+			["a", "g"],
+			["c", "e", "f"],
+		],
 	);
 	// 组内顺序保持后端排序（updated_at DESC），不做二次排序
 	const ordered = WorkView.groupWorks([
@@ -59,13 +63,13 @@ test("groupWorks buckets the seven statuses into the three fixed groups", () => 
 test("relativeTime degrades from 刚刚 to absolute date", () => {
 	const now = Date.parse("2026-08-27T12:00:00Z");
 	assert.equal(WorkView.relativeTime("2026-08-27T11:59:40Z", now), "刚刚");
-	assert.equal(
-		WorkView.relativeTime("2026-08-27T11:35:00Z", now),
-		"25 分钟前",
-	);
+	assert.equal(WorkView.relativeTime("2026-08-27T11:35:00Z", now), "25 分钟前");
 	assert.equal(WorkView.relativeTime("2026-08-27T06:00:00Z", now), "6 小时前");
 	assert.equal(WorkView.relativeTime("2026-08-24T12:00:00Z", now), "3 天前");
-	assert.equal(WorkView.relativeTime("2026-06-01T12:00:00Z", now), "2026-06-01");
+	assert.equal(
+		WorkView.relativeTime("2026-06-01T12:00:00Z", now),
+		"2026-06-01",
+	);
 	assert.equal(WorkView.relativeTime("", now), "");
 	assert.equal(WorkView.relativeTime("not-a-date", now), "");
 });
@@ -157,7 +161,10 @@ test("rowModel exposes artifact for in-row shortcut", () => {
 		artifactUri: "agentwork://abc123/work-1",
 		updatedAt: "2026-08-28T00:00:00Z",
 	});
-	assert.deepEqual(row.artifact, { uri: "agentwork://abc123/work-1", id: "work-1" });
+	assert.deepEqual(row.artifact, {
+		uri: "agentwork://abc123/work-1",
+		id: "work-1",
+	});
 	const none = WorkView.rowModel({
 		id: "w2",
 		title: "t",

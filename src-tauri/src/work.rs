@@ -188,7 +188,8 @@ pub fn transition_work(
     reason: Option<&str>,
 ) -> Result<WorkRecord, String> {
     tx_command(conn, move |tx| {
-        let record = get_work_in_tx(tx, work_id)?.ok_or_else(|| format!("work 不存在: {work_id}"))?;
+        let record =
+            get_work_in_tx(tx, work_id)?.ok_or_else(|| format!("work 不存在: {work_id}"))?;
         if record.status == to {
             return Ok(record);
         }
@@ -235,7 +236,8 @@ pub fn attach_work_artifact(
     attach: AttachArtifact,
 ) -> Result<WorkRecord, String> {
     tx_command(conn, move |tx| {
-        let record = get_work_in_tx(tx, work_id)?.ok_or_else(|| format!("work 不存在: {work_id}"))?;
+        let record =
+            get_work_in_tx(tx, work_id)?.ok_or_else(|| format!("work 不存在: {work_id}"))?;
         if record.status == WorkStatus::NeedsHuman {
             if record.artifact_uri.as_deref() == Some(attach.artifact_uri.as_str()) {
                 return Ok(record);
@@ -292,7 +294,8 @@ pub fn update_work(
     update: UpdateWork,
 ) -> Result<WorkRecord, String> {
     tx_command(conn, move |tx| {
-        let record = get_work_in_tx(tx, work_id)?.ok_or_else(|| format!("work 不存在: {work_id}"))?;
+        let record =
+            get_work_in_tx(tx, work_id)?.ok_or_else(|| format!("work 不存在: {work_id}"))?;
         let normalize = |value: Option<String>| -> Option<String> {
             value
                 .map(|value| value.trim().to_string())
@@ -619,10 +622,7 @@ mod tests {
         assert_eq!(completed.status, WorkStatus::Completed);
 
         let events = list_events(&conn, 10).unwrap();
-        let actions: Vec<_> = events
-            .iter()
-            .map(|event| event.action.as_str())
-            .collect();
+        let actions: Vec<_> = events.iter().map(|event| event.action.as_str()).collect();
         assert_eq!(
             actions,
             vec![
@@ -823,7 +823,9 @@ mod tests {
             find_work_by_receipt(&conn, " run-7 ").unwrap().unwrap().id,
             first.id
         );
-        assert!(find_work_by_receipt(&conn, "run-missing").unwrap().is_none());
+        assert!(find_work_by_receipt(&conn, "run-missing")
+            .unwrap()
+            .is_none());
         assert!(get_work(&conn, "missing").unwrap().is_none());
 
         let mine = list_works(&conn, Some("ws-hash"), 10).unwrap();

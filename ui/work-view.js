@@ -32,9 +32,7 @@
 		return WORK_GROUPS.map((group) => ({
 			key: group.key,
 			title: group.title,
-			items: records.filter((record) =>
-				group.statuses.includes(record.status),
-			),
+			items: records.filter((record) => group.statuses.includes(record.status)),
 		}));
 	}
 
@@ -142,7 +140,9 @@
 	}
 
 	function rowMatches(record, query) {
-		const needle = String(query || "").trim().toLocaleLowerCase();
+		const needle = String(query || "")
+			.trim()
+			.toLocaleLowerCase();
 		if (!needle) return true;
 		return [record.title, record.intent, record.summary]
 			.filter(Boolean)

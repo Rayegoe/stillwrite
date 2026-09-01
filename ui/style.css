@@ -5,6 +5,7 @@
 	color: #262626;
 	background: #f6f4ef;
 	--toolbar-h: 48px;
+	--format-toolbar-h: 40px;
 	--sidebar-width: 248px;
 	--line: rgba(35, 31, 26, 0.1);
 	--muted: #888077;
@@ -41,8 +42,11 @@ textarea:focus-visible {
 .shell {
 	height: 100%;
 	display: grid;
-	grid-template-rows: var(--toolbar-h) 1fr;
+	grid-template-rows: var(--toolbar-h) var(--format-toolbar-h) 1fr;
 	background: var(--paper);
+}
+.shell[data-format-toolbar="hidden"] {
+	grid-template-rows: var(--toolbar-h) 0 1fr;
 }
 .toolbar {
 	position: relative;
@@ -117,6 +121,96 @@ textarea:focus-visible {
 .text-btn {
 	padding: 0 10px;
 	font-size: 12px;
+}
+/* ---- 文档格式工具栏（第二行） ---- */
+.format-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 0 10px;
+	border-bottom: 1px solid var(--line);
+	background: rgba(246, 244, 239, 0.96);
+	user-select: none;
+	overflow-x: auto;
+	overflow-y: hidden;
+	scrollbar-width: none;
+	position: relative;
+}
+.format-toolbar::-webkit-scrollbar {
+	display: none;
+}
+.format-group {
+	display: flex;
+	align-items: center;
+	gap: 3px;
+}
+.format-group + .format-group {
+	margin-left: 6px;
+}
+.format-btn {
+	border: 0;
+	background: transparent;
+	border-radius: 7px;
+	min-width: 30px;
+	height: 30px;
+	padding: 0 4px;
+	font-size: 14px;
+	line-height: 1;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--ink);
+	white-space: nowrap;
+}
+.format-btn:hover {
+	background: var(--hover);
+}
+.format-btn:active {
+	background: var(--active);
+}
+.format-btn.active {
+	background: var(--active);
+}
+.format-btn:disabled {
+	opacity: 0.35;
+	cursor: default;
+	background: transparent;
+}
+.format-btn i {
+	font-style: italic;
+}
+.format-btn s {
+	text-decoration: line-through;
+}
+.heading-menu {
+	position: absolute;
+	top: calc(var(--toolbar-h) + var(--format-toolbar-h) - 4px);
+	left: 10px;
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	padding: 4px;
+	box-shadow: 0 8px 24px rgba(35, 31, 26, 0.12);
+	z-index: 30;
+	display: grid;
+	grid-template-columns: repeat(2, auto);
+	gap: 2px;
+}
+.heading-menu button {
+	border: 0;
+	background: transparent;
+	border-radius: 7px;
+	padding: 6px 14px;
+	font-size: 13px;
+	cursor: pointer;
+	text-align: left;
+}
+.heading-menu button:hover {
+	background: var(--hover);
+}
+.heading-menu button.active {
+	background: var(--active);
 }
 .file-menu {
 	position: relative;
@@ -1639,6 +1733,57 @@ body.resizing * {
 }
 .markdown-body del {
 	color: var(--muted);
+}
+/* ---- 预览：任务列表 / 图片 / 表格 ---- */
+.markdown-body img {
+	max-width: 100%;
+	height: auto;
+	border-radius: 8px;
+}
+.markdown-body .task-list {
+	padding-left: 1.45em;
+	list-style: none;
+}
+.markdown-body .task-list-item {
+	margin: 0.32em 0;
+	list-style: none;
+}
+.markdown-body .task-list-item input[type="checkbox"] {
+	margin-right: 0.55em;
+	vertical-align: baseline;
+	transform: translateY(-0.05em);
+}
+.markdown-body table {
+	border-collapse: collapse;
+	width: 100%;
+	max-width: 100%;
+	overflow-x: auto;
+	font-family: ui-sans-serif, system-ui, "PingFang SC", sans-serif;
+	font-size: 0.86em;
+	margin: 1.2em 0;
+}
+.markdown-body th,
+.markdown-body td {
+	border: 1px solid var(--line);
+	padding: 6px 10px;
+	text-align: left;
+	vertical-align: top;
+}
+.markdown-body th {
+	background: var(--panel);
+	font-weight: 600;
+}
+.markdown-body td.align-left,
+.markdown-body th.align-left {
+	text-align: left;
+}
+.markdown-body td.align-center,
+.markdown-body th.align-center {
+	text-align: center;
+}
+.markdown-body td.align-right,
+.markdown-body th.align-right {
+	text-align: right;
 }
 .welcome {
 	color: var(--muted);

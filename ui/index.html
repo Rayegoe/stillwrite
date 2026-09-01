@@ -14,7 +14,7 @@
           <button
             class="icon-btn"
             id="toggleSidebar"
-            title="显示/隐藏文件栏 (Ctrl+B)"
+            title="显示/隐藏文件栏 (Ctrl+Shift+B)"
           >
             ☰
           </button>
@@ -81,6 +81,48 @@
           </div>
         </div>
       </header>
+
+      <nav
+        class="format-toolbar"
+        id="formatToolbar"
+        aria-label="Markdown 格式工具栏"
+        hidden
+      >
+        <div class="format-group" role="group" aria-label="行内格式">
+          <button class="format-btn" data-format-command="bold" type="button" aria-label="粗体" title="粗体 (Ctrl+B)">B</button>
+          <button class="format-btn" data-format-command="italic" type="button" aria-label="斜体" title="斜体 (Ctrl+I)"><i>I</i></button>
+          <button class="format-btn" data-format-command="strikethrough" type="button" aria-label="删除线" title="删除线"><s>S</s></button>
+          <button class="format-btn" data-format-command="heading" type="button" aria-label="标题" title="标题">H</button>
+          <button class="format-btn" data-format-command="code" type="button" aria-label="代码" title="代码">&lt;/&gt;</button>
+        </div>
+        <div class="format-group" role="group" aria-label="段落格式">
+          <button class="format-btn" data-format-command="quote" type="button" aria-label="引用" title="引用">❝</button>
+          <button class="format-btn" data-format-command="list" type="button" aria-label="无序列表" title="无序列表">•≡</button>
+          <button class="format-btn" data-format-command="ordered-list" type="button" aria-label="有序列表" title="有序列表">1≡</button>
+          <button class="format-btn" data-format-command="check-list" type="button" aria-label="任务列表" title="任务列表">☑≡</button>
+        </div>
+        <div class="format-group" role="group" aria-label="插入">
+          <button class="format-btn" data-format-command="link" type="button" aria-label="链接" title="链接 (Ctrl+K)">🔗</button>
+          <button class="format-btn" data-format-command="image" type="button" aria-label="网络图片" title="网络图片">🖼</button>
+          <button class="format-btn" data-format-command="upload-image" type="button" aria-label="上传本地图片" title="上传本地图片">⬆🖼</button>
+        </div>
+        <div class="format-group" role="group" aria-label="结构">
+          <button class="format-btn" data-format-command="table" type="button" aria-label="表格" title="表格">▦</button>
+          <button class="format-btn" data-format-command="hr" type="button" aria-label="分割线" title="分割线">—</button>
+        </div>
+        <div class="format-group" role="group" aria-label="批注">
+          <button class="format-btn" data-format-command="comment" type="button" aria-label="批注" title="批注 (Ctrl+Shift+M)">✦</button>
+        </div>
+        <div class="heading-menu" id="headingMenu" hidden role="menu" aria-label="标题级别">
+          <button type="button" role="menuitem" data-heading-level="0">正文</button>
+          <button type="button" role="menuitem" data-heading-level="1">H1</button>
+          <button type="button" role="menuitem" data-heading-level="2">H2</button>
+          <button type="button" role="menuitem" data-heading-level="3">H3</button>
+          <button type="button" role="menuitem" data-heading-level="4">H4</button>
+          <button type="button" role="menuitem" data-heading-level="5">H5</button>
+          <button type="button" role="menuitem" data-heading-level="6">H6</button>
+        </div>
+      </nav>
 
       <main class="workspace">
         <aside class="sidebar" id="sidebar">
@@ -504,6 +546,7 @@
 
     <script src="./annotations.js"></script>
     <script src="./document-links.js"></script>
+    <script src="./markdown-formatting.js"></script>
     <script src="./agent-events.js"></script>
     <script src="./feeds.js"></script>
     <script src="./work-view.js"></script>

@@ -134,7 +134,10 @@ fn pi_request_lifecycle_reaches_needs_human_and_survives_restart() {
                     && event.payload.as_ref().unwrap()["to"] == "needs_human"
             })
             .unwrap();
-        assert_eq!(attached.payload.as_ref().unwrap()["artifact_uri"], ARTIFACT_URI);
+        assert_eq!(
+            attached.payload.as_ref().unwrap()["artifact_uri"],
+            ARTIFACT_URI
+        );
     }
 }
 
@@ -210,14 +213,26 @@ fn start_failures_and_abort_end_in_queryable_terminal_states() {
     let conn = open_state_db(&db_path).unwrap();
     let statuses: Vec<_> = ["run-blocked", "run-failed", "run-cancelled"]
         .iter()
-        .map(|receipt| find_work_by_receipt(&conn, receipt).unwrap().unwrap().status)
+        .map(|receipt| {
+            find_work_by_receipt(&conn, receipt)
+                .unwrap()
+                .unwrap()
+                .status
+        })
         .collect();
     assert_eq!(
         statuses,
-        vec![WorkStatus::Blocked, WorkStatus::Failed, WorkStatus::Cancelled]
+        vec![
+            WorkStatus::Blocked,
+            WorkStatus::Failed,
+            WorkStatus::Cancelled
+        ]
     );
     assert_eq!(list_works(&conn, Some(WORKSPACE_ID), 10).unwrap().len(), 3);
-    assert_eq!(get_work(&conn, &ids[0]).unwrap().unwrap().status, WorkStatus::Blocked);
+    assert_eq!(
+        get_work(&conn, &ids[0]).unwrap().unwrap().status,
+        WorkStatus::Blocked
+    );
 }
 
 #[test]
@@ -302,12 +317,12 @@ fn settled_text_without_saved_artifact_keeps_work_running() {
 
     // 事件面停留在 created + running：settled 没有伪造任何 Work 事件
     let events = list_events(&conn, 10).unwrap();
-    let actions: Vec<_> = events
-        .iter()
-        .map(|event| event.action.as_str())
-        .collect();
+    let actions: Vec<_> = events.iter().map(|event| event.action.as_str()).collect();
     assert_eq!(
         actions,
-        vec![event_action::WORK_STATUS_CHANGED, event_action::WORK_CREATED]
+        vec![
+            event_action::WORK_STATUS_CHANGED,
+            event_action::WORK_CREATED
+        ]
     );
 }
