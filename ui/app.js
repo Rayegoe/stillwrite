@@ -1582,10 +1582,7 @@ function renderTable(headerCells, delimiterCells, rows) {
 		tableCellAlignClass(delimiterCells[i] || "---"),
 	);
 	const thead = `<thead><tr>${headerCells
-		.map(
-			(cell, i) =>
-				`<th class="${align[i]}">${renderInline(cell)}</th>`,
-		)
+		.map((cell, i) => `<th class="${align[i]}">${renderInline(cell)}</th>`)
 		.join("")}</tr></thead>`;
 	const tbody = rows.length
 		? `<tbody>${rows
@@ -1779,18 +1776,11 @@ function sanitizeHtml(html) {
 				return;
 			}
 			if (tag === "INPUT") {
-				if (
-					name === "type" &&
-					attr.value.toLowerCase() !== "checkbox"
-				) {
+				if (name === "type" && attr.value.toLowerCase() !== "checkbox") {
 					el.removeAttribute(attr.name);
 					return;
 				}
-				if (
-					name === "checked" ||
-					name === "disabled" ||
-					name === "class"
-				) {
+				if (name === "checked" || name === "disabled" || name === "class") {
 					return; // 保留
 				}
 				el.removeAttribute(attr.name);
@@ -4541,7 +4531,9 @@ function formatEditableContext() {
 
 /// Workspace 可上传本地图片；Agent Work 的 AppData 正文 v0.1 不建 asset store。
 function canUploadWorkspaceImage() {
-	return Boolean(currentFile && !currentLibraryDocument && !currentAgentDocument);
+	return Boolean(
+		currentFile && !currentLibraryDocument && !currentAgentDocument,
+	);
 }
 
 function updateFormatToolbarState() {
@@ -4590,7 +4582,10 @@ function updateFormatToolbarState() {
 }
 
 function textareaSelection() {
-	return { selectionStart: editor.selectionStart, selectionEnd: editor.selectionEnd };
+	return {
+		selectionStart: editor.selectionStart,
+		selectionEnd: editor.selectionEnd,
+	};
 }
 
 function restoreEditorSelection(selectionStart, selectionEnd) {
@@ -4629,7 +4624,8 @@ function applyFormatCommand(command, options = {}) {
 		command,
 		options,
 	});
-	if (!result || result.value === editor.value && command !== "heading") return;
+	if (!result || (result.value === editor.value && command !== "heading"))
+		return;
 	applyEditorResult(result);
 }
 
@@ -4678,7 +4674,12 @@ function toggleHeadingMenu() {
 function currentLineHeadingLevel() {
 	const start = editor.selectionStart;
 	const lineStart = editor.value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
-	const line = editor.value.slice(lineStart, editor.value.indexOf("\n", start) === -1 ? undefined : editor.value.indexOf("\n", start));
+	const line = editor.value.slice(
+		lineStart,
+		editor.value.indexOf("\n", start) === -1
+			? undefined
+			: editor.value.indexOf("\n", start),
+	);
 	const match = line.match(/^\s{0,3}(#{1,6})\s+/);
 	return match ? match[1].length : 0;
 }
@@ -4686,10 +4687,7 @@ function currentLineHeadingLevel() {
 function updateHeadingMenuHighlight() {
 	const level = currentLineHeadingLevel();
 	headingMenu.querySelectorAll("[data-heading-level]").forEach((btn) => {
-		btn.classList.toggle(
-			"active",
-			Number(btn.dataset.headingLevel) === level,
-		);
+		btn.classList.toggle("active", Number(btn.dataset.headingLevel) === level);
 	});
 }
 
@@ -4718,7 +4716,10 @@ headingMenu.addEventListener("click", (event) => {
 });
 
 document.addEventListener("pointerdown", (event) => {
-	if (headingMenuOpen && !event.target.closest("#headingMenu, [data-format-command=\"heading\"]")) {
+	if (
+		headingMenuOpen &&
+		!event.target.closest('#headingMenu, [data-format-command="heading"]')
+	) {
 		closeHeadingMenu();
 	}
 });
@@ -4731,61 +4732,44 @@ document.addEventListener("pointerdown", (event) => {
 // 注意：阅读区内容列默认 max-width: 760px 居中，页边距超过 (窗宽 − 760) / 2
 // 才会推动文字；因此用户设过固定值后，单栏读模式放开版心（CSS: body.margin-
 // fixed），让任何数值立即可见——760px 版心只属于 auto，不纳入按键管理。
+// 状态与步进逻辑在 margin-control.js（StillwriteMarginControl）；这里只做 DOM 接线。
+// 中间数值 = 可点击的显式状态控件：auto（未设置键）显示 AUTO，固定时显示 px；
+// 点击固定数值即删除 stillwrite.markdownPaddingX，立即恢复 AUTO，且不再加
+// body.margin-fixed（读单模式回到 760px 居中版心）。
 // ---------------------------------------------------------------------------
 
-const MARGIN_STORAGE_KEY = "stillwrite.markdownPaddingX";
-const MARGIN_MIN = 16;
-const MARGIN_MAX = 480;
-const MARGIN_STEP = 8;
-// 从 auto 首次点击的起步值：取写/双栏 clamp 在常见窗宽下的典型生效量，
-// 保证首击方向与按钮语义一致（− 变窄、＋ 变宽），而不是从极值跳变。
-const MARGIN_AUTO_SEED = 72;
-let markdownPaddingX = parseInt(
-	localStorage.getItem(MARGIN_STORAGE_KEY),
-	10,
-);
-if (Number.isNaN(markdownPaddingX)) markdownPaddingX = null;
+const MarginControl = window.StillwriteMarginControl;
 
-const marginControl = document.querySelector("#marginControl");
+const marginValueEl = document.querySelector("#marginValue");
 const marginNarrowBtn = document.querySelector("#marginNarrow");
 const marginWideBtn = document.querySelector("#marginWide");
-const marginValueEl = document.querySelector("#marginValue");
 
-function applyMarkdownPadding() {
+function writeMarginProjection(projection) {
 	const rootStyle = document.documentElement.style;
-	// margin-fixed：用户设过固定值。读单模式据此放开 760px 居中版心，
-	// 让任何边距数值都立即可见；auto（null）保持居中阅读版心。
-	if (markdownPaddingX === null) {
-		rootStyle.removeProperty("--markdown-padding-x");
-		rootStyle.removeProperty("--editor-padding-x");
-		document.body.classList.remove("margin-fixed");
-		marginValueEl.textContent = "auto";
-	} else {
-		rootStyle.setProperty("--markdown-padding-x", `${markdownPaddingX}px`);
-		rootStyle.setProperty("--editor-padding-x", `${markdownPaddingX}px`);
-		document.body.classList.add("margin-fixed");
-		marginValueEl.textContent = String(markdownPaddingX);
+	for (const [key, value] of projection.setCss) {
+		rootStyle.setProperty(key, value);
 	}
+	for (const key of projection.removeCss) {
+		rootStyle.removeProperty(key);
+	}
+	for (const className of projection.addClass) {
+		document.body.classList.add(className);
+	}
+	for (const className of projection.removeClass) {
+		document.body.classList.remove(className);
+	}
+	marginValueEl.textContent = projection.label;
 }
 
-function setMarkdownPaddingX(value) {
-	markdownPaddingX = Math.max(MARGIN_MIN, Math.min(MARGIN_MAX, value));
-	localStorage.setItem(MARGIN_STORAGE_KEY, String(markdownPaddingX));
-	applyMarkdownPadding();
-}
-
-marginNarrowBtn.addEventListener("click", () => {
-	setMarkdownPaddingX(
-		Math.max(MARGIN_MIN, (markdownPaddingX ?? MARGIN_AUTO_SEED) - MARGIN_STEP),
-	);
+const marginState = MarginControl.create({
+	storage: localStorage,
+	apply: writeMarginProjection,
 });
-marginWideBtn.addEventListener("click", () => {
-	setMarkdownPaddingX(
-		Math.min(MARGIN_MAX, (markdownPaddingX ?? MARGIN_AUTO_SEED) + MARGIN_STEP),
-	);
-});
-applyMarkdownPadding();
 
+marginNarrowBtn.addEventListener("click", () => marginState.step(-1));
+marginWideBtn.addEventListener("click", () => marginState.step(+1));
+marginValueEl.addEventListener("click", () => marginState.resetToAuto());
+marginState.sync();
 
 function clearWebSearch({ resetView = true, clearHistory = false } = {}) {
 	webSearchRequestToken += 1;
@@ -5307,7 +5291,8 @@ function updateFileMenuState() {
 	saveDocumentItem.disabled = !state.save;
 	saveDocumentAsItem.disabled = !state.saveAs;
 	workspaceMenuTrigger.disabled = !state.workspace;
-	if (state.workspace === false) setFileMenuSubmenuOpen(workspaceMenuTrigger, workspaceMenu, false);
+	if (state.workspace === false)
+		setFileMenuSubmenuOpen(workspaceMenuTrigger, workspaceMenu, false);
 }
 
 function setFileMenuOpen(open) {
@@ -5358,11 +5343,17 @@ function positionSubmenu(menu) {
 	}
 	const margin = 8;
 	const rect = menu.getBoundingClientRect();
-	if (rect.right + margin > window.innerWidth && rect.left - rect.width - margin >= 0) {
+	if (
+		rect.right + margin > window.innerWidth &&
+		rect.left - rect.width - margin >= 0
+	) {
 		menu.classList.add("open-left");
 	}
 	const adjusted = menu.getBoundingClientRect();
-	if (adjusted.bottom + margin > window.innerHeight && adjusted.top - adjusted.height - margin >= 0) {
+	if (
+		adjusted.bottom + margin > window.innerHeight &&
+		adjusted.top - adjusted.height - margin >= 0
+	) {
 		menu.classList.add("open-up");
 	}
 	if (wasHidden) {
@@ -5560,7 +5551,8 @@ async function createWorkspaceFolder(parentPath, name) {
 }
 
 function relativeDirPrefix(directoryPath) {
-	if (!rootPath || !directoryPath || samePath(directoryPath, rootPath)) return "";
+	if (!rootPath || !directoryPath || samePath(directoryPath, rootPath))
+		return "";
 	const normalizedDir = directoryPath.replaceAll("\\", "/").replace(/\/+$/, "");
 	const normalizedRoot = rootPath.replaceAll("\\", "/").replace(/\/+$/, "");
 	return normalizedDir.startsWith(`${normalizedRoot}/`)
@@ -5774,10 +5766,7 @@ fileMenuRoot.addEventListener("keydown", (event) => {
 			event.preventDefault();
 			setFileMenuSubmenuOpen(recentMenuTrigger, recentMenu, true);
 			visibleEnabledMenuItems(recentMenu)[0]?.focus();
-		} else if (
-			focusTarget === workspaceMenuTrigger &&
-			workspaceMenu.hidden
-		) {
+		} else if (focusTarget === workspaceMenuTrigger && workspaceMenu.hidden) {
 			event.preventDefault();
 			setFileMenuSubmenuOpen(workspaceMenuTrigger, workspaceMenu, true);
 			visibleEnabledMenuItems(workspaceMenu)[0]?.focus();
@@ -5788,7 +5777,8 @@ fileMenuRoot.addEventListener("keydown", (event) => {
 		const menu = focusTarget?.closest("[role='menu']");
 		if (menu === recentMenu || menu === workspaceMenu) {
 			event.preventDefault();
-			const trigger = menu === recentMenu ? recentMenuTrigger : workspaceMenuTrigger;
+			const trigger =
+				menu === recentMenu ? recentMenuTrigger : workspaceMenuTrigger;
 			setFileMenuSubmenuOpen(trigger, menu, false);
 			trigger.focus();
 		}
@@ -5803,7 +5793,10 @@ fileMenuRoot.addEventListener("keydown", (event) => {
 });
 function navigateMenuItems(menu, currentEl, direction) {
 	const items = visibleEnabledMenuItems(menu);
-	const models = items.map((el) => ({ disabled: el.disabled, hidden: el.hidden }));
+	const models = items.map((el) => ({
+		disabled: el.disabled,
+		hidden: el.hidden,
+	}));
 	if (direction === "first" || direction === "end") {
 		const edge = FileMenuHelpers.edgeEnabledMenuItem(
 			models,
@@ -5827,10 +5820,7 @@ workspaceAggregateItem.addEventListener("click", () => {
 workspaceCloseItem.addEventListener("click", () => void closeWorkspace());
 document.addEventListener("pointerdown", (event) => {
 	if (!fileMenuRoot.contains(event.target)) setFileMenuOpen(false);
-	if (
-		!treeContextMenu.hidden &&
-		!treeContextMenu.contains(event.target)
-	)
+	if (!treeContextMenu.hidden && !treeContextMenu.contains(event.target))
 		closeTreeContextMenu();
 });
 newFolderForm.addEventListener("submit", (event) => {
@@ -6001,7 +5991,8 @@ window.addEventListener("keydown", (event) => {
 			// Esc 先关 submenu，再关 File menu
 			if (anyFileSubmenuOpen()) {
 				const openMenu = !recentMenu.hidden ? recentMenu : workspaceMenu;
-				const trigger = openMenu === recentMenu ? recentMenuTrigger : workspaceMenuTrigger;
+				const trigger =
+					openMenu === recentMenu ? recentMenuTrigger : workspaceMenuTrigger;
 				setFileMenuSubmenuOpen(trigger, openMenu, false);
 				trigger.focus();
 			} else {

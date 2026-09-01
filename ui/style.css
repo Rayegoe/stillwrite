@@ -1767,10 +1767,25 @@ body.resizing * {
 }
 .margin-value {
 	min-width: 26px;
+	height: 26px;
+	padding: 0 6px;
 	text-align: center;
 	font-size: 10px;
 	color: var(--muted);
 	font-variant-numeric: tabular-nums;
+	/* 中间数值 = 可点击的显式状态控件：fixed 时点击恢复 AUTO */
+	border: 0;
+	background: transparent;
+	border-radius: 6px;
+	line-height: 26px;
+	font-family: inherit;
+	cursor: pointer;
+}
+.margin-value:hover {
+	background: var(--hover);
+}
+.margin-value:active {
+	background: var(--active);
 }
 
 #editor {

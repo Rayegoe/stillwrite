@@ -135,38 +135,178 @@
         hidden
       >
         <div class="format-group" role="group" aria-label="行内格式">
-          <button class="format-btn" data-format-command="bold" type="button" aria-label="粗体" title="粗体 (Ctrl+B)">B</button>
-          <button class="format-btn" data-format-command="italic" type="button" aria-label="斜体" title="斜体 (Ctrl+I)"><i>I</i></button>
-          <button class="format-btn" data-format-command="strikethrough" type="button" aria-label="删除线" title="删除线"><s>S</s></button>
-          <button class="format-btn" data-format-command="heading" type="button" aria-label="标题" title="标题">H</button>
-          <button class="format-btn" data-format-command="code" type="button" aria-label="代码" title="代码">&lt;/&gt;</button>
+          <button
+            class="format-btn"
+            data-format-command="bold"
+            type="button"
+            aria-label="粗体"
+            title="粗体 (Ctrl+B)"
+          >
+            B
+          </button>
+          <button
+            class="format-btn"
+            data-format-command="italic"
+            type="button"
+            aria-label="斜体"
+            title="斜体 (Ctrl+I)"
+          >
+            <i>I</i>
+          </button>
+          <button
+            class="format-btn"
+            data-format-command="strikethrough"
+            type="button"
+            aria-label="删除线"
+            title="删除线"
+          >
+            <s>S</s>
+          </button>
+          <button
+            class="format-btn"
+            data-format-command="heading"
+            type="button"
+            aria-label="标题"
+            title="标题"
+          >
+            H
+          </button>
+          <button
+            class="format-btn"
+            data-format-command="code"
+            type="button"
+            aria-label="代码"
+            title="代码"
+          >
+            &lt;/&gt;
+          </button>
         </div>
         <div class="format-group" role="group" aria-label="段落格式">
-          <button class="format-btn" data-format-command="quote" type="button" aria-label="引用" title="引用">❝</button>
-          <button class="format-btn" data-format-command="list" type="button" aria-label="无序列表" title="无序列表">•≡</button>
-          <button class="format-btn" data-format-command="ordered-list" type="button" aria-label="有序列表" title="有序列表">1≡</button>
-          <button class="format-btn" data-format-command="check-list" type="button" aria-label="任务列表" title="任务列表">☑≡</button>
+          <button
+            class="format-btn"
+            data-format-command="quote"
+            type="button"
+            aria-label="引用"
+            title="引用"
+          >
+            ❝
+          </button>
+          <button
+            class="format-btn"
+            data-format-command="list"
+            type="button"
+            aria-label="无序列表"
+            title="无序列表"
+          >
+            •≡
+          </button>
+          <button
+            class="format-btn"
+            data-format-command="ordered-list"
+            type="button"
+            aria-label="有序列表"
+            title="有序列表"
+          >
+            1≡
+          </button>
+          <button
+            class="format-btn"
+            data-format-command="check-list"
+            type="button"
+            aria-label="任务列表"
+            title="任务列表"
+          >
+            ☑≡
+          </button>
         </div>
         <div class="format-group" role="group" aria-label="插入">
-          <button class="format-btn" data-format-command="link" type="button" aria-label="链接" title="链接 (Ctrl+K)">🔗</button>
-          <button class="format-btn" data-format-command="image" type="button" aria-label="网络图片" title="网络图片">🖼</button>
-          <button class="format-btn" data-format-command="upload-image" type="button" aria-label="上传本地图片" title="上传本地图片">⬆🖼</button>
+          <button
+            class="format-btn"
+            data-format-command="link"
+            type="button"
+            aria-label="链接"
+            title="链接 (Ctrl+K)"
+          >
+            🔗
+          </button>
+          <button
+            class="format-btn"
+            data-format-command="image"
+            type="button"
+            aria-label="网络图片"
+            title="网络图片"
+          >
+            🖼
+          </button>
+          <button
+            class="format-btn"
+            data-format-command="upload-image"
+            type="button"
+            aria-label="上传本地图片"
+            title="上传本地图片"
+          >
+            ⬆🖼
+          </button>
         </div>
         <div class="format-group" role="group" aria-label="结构">
-          <button class="format-btn" data-format-command="table" type="button" aria-label="表格" title="表格">▦</button>
-          <button class="format-btn" data-format-command="hr" type="button" aria-label="分割线" title="分割线">—</button>
+          <button
+            class="format-btn"
+            data-format-command="table"
+            type="button"
+            aria-label="表格"
+            title="表格"
+          >
+            ▦
+          </button>
+          <button
+            class="format-btn"
+            data-format-command="hr"
+            type="button"
+            aria-label="分割线"
+            title="分割线"
+          >
+            —
+          </button>
         </div>
         <div class="format-group" role="group" aria-label="批注">
-          <button class="format-btn" data-format-command="comment" type="button" aria-label="批注" title="批注 (Ctrl+Shift+M)">✦</button>
+          <button
+            class="format-btn"
+            data-format-command="comment"
+            type="button"
+            aria-label="批注"
+            title="批注 (Ctrl+Shift+M)"
+          >
+            ✦
+          </button>
         </div>
-        <div class="heading-menu" id="headingMenu" hidden role="menu" aria-label="标题级别">
-          <button type="button" role="menuitem" data-heading-level="0">正文</button>
-          <button type="button" role="menuitem" data-heading-level="1">H1</button>
-          <button type="button" role="menuitem" data-heading-level="2">H2</button>
-          <button type="button" role="menuitem" data-heading-level="3">H3</button>
-          <button type="button" role="menuitem" data-heading-level="4">H4</button>
-          <button type="button" role="menuitem" data-heading-level="5">H5</button>
-          <button type="button" role="menuitem" data-heading-level="6">H6</button>
+        <div
+          class="heading-menu"
+          id="headingMenu"
+          hidden
+          role="menu"
+          aria-label="标题级别"
+        >
+          <button type="button" role="menuitem" data-heading-level="0">
+            正文
+          </button>
+          <button type="button" role="menuitem" data-heading-level="1">
+            H1
+          </button>
+          <button type="button" role="menuitem" data-heading-level="2">
+            H2
+          </button>
+          <button type="button" role="menuitem" data-heading-level="3">
+            H3
+          </button>
+          <button type="button" role="menuitem" data-heading-level="4">
+            H4
+          </button>
+          <button type="button" role="menuitem" data-heading-level="5">
+            H5
+          </button>
+          <button type="button" role="menuitem" data-heading-level="6">
+            H6
+          </button>
         </div>
       </nav>
 
@@ -384,7 +524,8 @@
                 aria-controls="workEvidenceStream"
                 hidden
               >
-                证据 <span class="annotate-count" id="workEvidenceCount">0</span>
+                证据
+                <span class="annotate-count" id="workEvidenceCount">0</span>
               </button>
             </div>
             <div class="annotate-actions">
@@ -446,8 +587,16 @@
             id="webSearchStream"
             hidden
           ></div>
-          <div class="related-stream work-context-stream" id="workContextStream" hidden></div>
-          <div class="related-stream work-evidence-stream" id="workEvidenceStream" hidden></div>
+          <div
+            class="related-stream work-context-stream"
+            id="workContextStream"
+            hidden
+          ></div>
+          <div
+            class="related-stream work-evidence-stream"
+            id="workEvidenceStream"
+            hidden
+          ></div>
           <div class="annotate-foot" id="annotateFooter">
             <span id="annotateFoot">批注保存在「批注/」，随文档同步。</span>
             <button
@@ -475,7 +624,15 @@
           >
             −
           </button>
-          <span class="margin-value" id="marginValue">64</span>
+          <button
+            class="margin-value"
+            id="marginValue"
+            type="button"
+            title="点击恢复自动页边距"
+            aria-label="页边距状态：AUTO 或当前像素。点击恢复自动"
+          >
+            64
+          </button>
           <button
             class="margin-btn"
             id="marginWide"
@@ -543,11 +700,10 @@
           placeholder="输入 Brave API Key"
         />
         <p class="modal-help">
-          密钥保存在 Stillwrite 应用数据目录，仅由后端用于互联网搜索；已保存的密钥不会回显。
+          密钥保存在 Stillwrite
+          应用数据目录，仅由后端用于互联网搜索；已保存的密钥不会回显。
         </p>
-        <div class="settings-key-status" id="braveApiKeyStatus">
-          尚未配置
-        </div>
+        <div class="settings-key-status" id="braveApiKeyStatus">尚未配置</div>
         <div class="modal-actions">
           <button type="button" class="text-btn" id="clearBraveApiKey">
             清除
@@ -622,7 +778,9 @@
         <h3>新建文件夹</h3>
         <label for="newFolderName">文件夹名</label>
         <input id="newFolderName" value="untitled" autocomplete="off" />
-        <p class="modal-help">在所选目录下创建；名称不能包含 <code>/</code> 或 <code>\</code></p>
+        <p class="modal-help">
+          在所选目录下创建；名称不能包含 <code>/</code> 或 <code>\</code>
+        </p>
         <div class="modal-actions">
           <button type="button" class="text-btn" id="cancelNewFolder">
             取消
@@ -634,7 +792,12 @@
       </form>
     </dialog>
 
-    <div class="tree-context-menu" id="treeContextMenu" role="menu" hidden></div>
+    <div
+      class="tree-context-menu"
+      id="treeContextMenu"
+      role="menu"
+      hidden
+    ></div>
 
     <script src="./annotations.js"></script>
     <script src="./document-links.js"></script>
@@ -643,6 +806,7 @@
     <script src="./feeds.js"></script>
     <script src="./work-view.js"></script>
     <script src="./file-menu.js"></script>
+    <script src="./margin-control.js"></script>
     <script src="./app.js"></script>
     <script src="./library-annotation-links.js"></script>
   </body>
