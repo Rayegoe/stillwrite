@@ -1,8 +1,25 @@
 # M4 — Interaction Contract Reset 验收矩阵
 
 > 状态：自动化部分已落地（2026-09-01）。L1/L2 由 `cargo test` + `node --test`
-> 覆盖；L3 是真人操作 gate（spec 06），需要带真实 Pi 的 GUI 会话执行一次。
+> 覆盖；L3 是真人操作 gate（spec 06 + 2026-09-01 UI projection 修正），
+> 需要带真实 Pi 的 GUI 会话执行一次。
 > 数据规则沿用 03 Rule 8：不允许 mock Work/Session 数据通过业务验收。
+
+## UI projection（2026-09-01 修正）
+
+普通 Agent 回答的投影 = **右栏第四个 Context 视图**（`批注|关联|搜索|Agent`），
+不是独立 modal/Answer Card：
+
+- 选区「问 Agent」→ 提交后右栏自动切到 Agent 视图，流式显示回答；
+- 回答锚定当前文档/选区（显示「针对选中的内容」+ 引文），不离开当前文档；
+- 处置动作：`继续问`（M5 Session 后开放）/ `插入正文` / `保存为笔记` / `委派成工作`；
+- 切回批注再切回 Agent，回答保留在当前界面状态（不落盘、不丢）；
+- 换文档/换工作区即清空（回答锚在当时的文档上下文上）；
+- **边界：复用批注栏的位置与交互范式，不把回答写进 Annotation schema**——
+  批注是 Human-authored durable annotation，Agent 回答的
+  `Document → Anchor → AgentSession → Response` 结构随 M5/M6 落地。
+- rewrite 类任务的 inline diff、Work Artifact 的右栏 `工作` Review 视图
+  分别属于后续里程碑，不在本版。
 
 ## 契约（本里程碑冻结）
 
@@ -40,23 +57,28 @@ agent_start input = {
 | F3 | surface resume 三级优先：上次 Surface → 最近可用文档 → Work Home；坏数据不抛错 | `ui/surface-resume.test.js` |
 | F4 | run settled 的 UI 状态语言 =「已生成」，不是「已完成」 | `ui/agent-events.test.js` |
 
-## L3. 真人 GUI gate（spec 06 M4 验收，待执行）
+## L3. 真人 GUI gate（待执行）
 
 前置：真实 workspace + 可用 Pi。
 
-- [ ] 启动 1：上次停在某个文档 → 重启 StillWrite → 恢复该文档（非 Work Home）。
-- [ ] 启动 2：删除上次文档后重启 → 恢复最近可用 Workspace 文档。
-- [ ] 启动 3：清空 recents + 无有效 surface → 进入 Work Home/empty state。
-- [ ] 启动 4：上次停在 Work Detail → 重启恢复该 Work 详情。
-- [ ] 连续 5 次选区「问 Agent」（assist）→ Work Inbox 新增 0 个 Work；回答以
-      Answer Card 呈现；[插入正文] 写入当前文档；[保存为文档] 生成 Workspace md；
-      [委派成工作] 打开委派 composer 且预填原始 instruction。
+1. [ ] 不创建 Work（5 次选区 Ask 后 Work Inbox 新增 0）。
+2. [ ] 不创建 Agent Work Markdown（assist 不产生 artifact 文件）。
+3. [ ] 回答不离开当前 Document（右栏 Agent 视图，无全屏/独立页面）。
+4. [ ] 当前 selection/anchor 保持关联（卡片显示「针对选中的内容」+ 引文）。
+5. [ ] 可插入正文（回答写入当前文档光标处，走正常保存/预览管线）。
+6. [ ] 可保存为文档/笔记（生成 Workspace md 并打开）。
+7. [ ] 可委派成 Work（composer 预填原始 instruction，委派后恰新增 1 个 Work）。
+8. [ ] 切回「批注」再切回「Agent」，回答仍保留在当前界面状态。
+9. [ ] `继续问` 按钮存在且置灰（M5 Session 后开放）。
+10. [ ] 不修改 Annotation schema（回答不出现在批注列表/批注文件中）。
+
+另验（M4 原有 gate）：
+
+- [ ] 启动恢复：上次文档 / 删除后回退最近文档 / 无对象进 Work Home /
+      上次 Work Detail，四种场景符合 02_M3_HANDOFF 优先级。
 - [ ] 2 次显式委派（Work Home「发起 Agent 工作」/ 侧栏 ＋）→ 恰好 2 个 Work；
-      按钮/对话框呈现「委派 Agent 工作 / 开始工作」。
-- [ ] 两个新 Work 的 intent 与输入逐字一致，不含
-      `# Current source` / `# Selected text` / `# Explicit references`。
-- [ ] assist 失败一次（可拔掉 Pi 配置）→ 有失败提示；`agent_recent_runs`/receipt
-      可查到该次失败证据；Work Inbox 无新增。
+      intent 与输入逐字一致，不含 host context 段落。
+- [ ] assist 失败一次 → 右栏显示失败与证据指引；receipt 可查；Work Inbox 无新增。
 - [ ] legacy：旧 Agent Work 列表/打开/编辑正常；旧 Work 详情正常。
 
 ## 回归（03 Rules 7，本里程碑不得破坏）

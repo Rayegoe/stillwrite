@@ -139,16 +139,10 @@ const agentAskRefList = document.querySelector("#agentAskRefList");
 const agentAskPrompt = document.querySelector("#agentAskPrompt");
 const agentAskCancel = document.querySelector("#agentAskCancel");
 const agentAskSend = document.querySelector("#agentAskSend");
-// M4 Answer Card：assist 结果的展示与处置入口（不落 Work）。
-const agentAnswerDialog = document.querySelector("#agentAnswerDialog");
-const agentAnswerTitle = document.querySelector("#agentAnswerTitle");
-const agentAnswerContext = document.querySelector("#agentAnswerContext");
-const agentAnswerQuote = document.querySelector("#agentAnswerQuote");
-const agentAnswerBody = document.querySelector("#agentAnswerBody");
-const agentAnswerInsert = document.querySelector("#agentAnswerInsert");
-const agentAnswerSaveDoc = document.querySelector("#agentAnswerSaveDoc");
-const agentAnswerDelegate = document.querySelector("#agentAnswerDelegate");
-const agentAnswerClose = document.querySelector("#agentAnswerClose");
+// M4 Agent Context View：右栏第四个 Context 视图（批注|关联|搜索|Agent）。
+// 普通回答投影在这里，复用支持栏骨架；不落 Work / 不伪装成批注。
+const agentViewButton = document.querySelector("#agentViewButton");
+const agentStream = document.querySelector("#agentStream");
 const settingsButton = document.querySelector("#settingsButton");
 const settingsDialog = document.querySelector("#settingsDialog");
 const settingsForm = document.querySelector("#settingsForm");
@@ -185,9 +179,11 @@ let feedBusy = false;
 const citationBasket = new Map();
 let agentWorkItems = [];
 let pendingAgentRequest = null;
-// 最近一次 assist 回答（Answer Card 数据源）：instruction + 回答正文 + 上下文。
-// 只活在当前界面会话，不进入 durable state；委派成工作时会用到原始 instruction。
+// 当前 Agent Context Card（右栏 agent 视图的数据源）。state:
+// running → done / failed。只活在当前界面会话，不进入 durable state；
+// 委派成工作时会用到原始 instruction。换文档/工作区即清空。
 let lastAgentAnswer = null;
+let agentContextRenderTimer = null;
 let localAgentRuns = [];
 // 持久化运行收据里的失败记录（AppData/agent/runs），重启应用后仍可见。
 let historicAgentFailures = [];
@@ -925,6 +921,7 @@ function setSupportView(view) {
 	supportView = [
 		"related",
 		"web-search",
+		"agent",
 		"work-context",
 		"work-evidence",
 	].includes(view)
@@ -932,17 +929,20 @@ function setSupportView(view) {
 		: "annotation";
 	const related = supportView === "related";
 	const webSearch = supportView === "web-search";
+	const agent = supportView === "agent";
 	const workContext = supportView === "work-context";
 	const workEvidence = supportView === "work-evidence";
-	const documentView = !related && !webSearch && !workContext && !workEvidence;
+	const documentView = !related && !webSearch && !agent && !workContext && !workEvidence;
 	annotationViewButton.classList.toggle("active", documentView);
 	relatedViewButton.classList.toggle("active", related);
 	webSearchViewButton.classList.toggle("active", webSearch);
+	agentViewButton.classList.toggle("active", agent);
 	workContextViewButton.classList.toggle("active", workContext);
 	workEvidenceViewButton.classList.toggle("active", workEvidence);
 	annotationViewButton.setAttribute("aria-selected", String(documentView));
 	relatedViewButton.setAttribute("aria-selected", String(related));
 	webSearchViewButton.setAttribute("aria-selected", String(webSearch));
+	agentViewButton.setAttribute("aria-selected", String(agent));
 	workContextViewButton.setAttribute("aria-selected", String(workContext));
 	workEvidenceViewButton.setAttribute("aria-selected", String(workEvidence));
 	newAnnotationButton.hidden = documentView ? false : true;
@@ -950,10 +950,12 @@ function setSupportView(view) {
 	annotateFooter.hidden = !documentView;
 	relatedStream.hidden = !related;
 	webSearchStream.hidden = !webSearch;
+	agentStream.hidden = !agent;
 	workContextStream.hidden = !workContext;
 	workEvidenceStream.hidden = !workEvidence;
 	if (related) renderRelatedPanel();
 	if (webSearch) renderWebSearchState();
+	if (agent) renderAgentContext();
 	if (workContext) renderWorkContextPanel();
 	if (workEvidence) renderWorkEvidencePanel();
 }
@@ -1384,6 +1386,11 @@ function handleAgentEvent(envelope) {
 	if (!run || !AgentEvents) return;
 	Object.assign(run, AgentEvents.applyAgentEvent(run, payload));
 	if (workMode && legacyAgentView) renderAgentWorks();
+	// Agent Context 视图随流式事件刷新（节流）；最终文本由
+	// submitAgentQuestion 的 settle 分支负责定稿渲染。
+	if (supportView === "agent" && lastAgentAnswer?.runId === runId) {
+		scheduleAgentContextRender();
+	}
 	if (AgentEvents.TERMINAL_EVENTS.has(payload.type)) {
 		const waiter = agentRunWaiters.get(runId);
 		if (waiter) {
@@ -1440,6 +1447,7 @@ function makeLocalAgentRun(request, prompt) {
 	const id = `local-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
 	return {
 		id,
+		mode: request?.mode === "work" ? "work" : "assist",
 		title: agentWorkTitle(prompt),
 		prompt,
 		originUri: request?.originUri || null,
@@ -2535,6 +2543,7 @@ async function useWorkspace(data) {
 		localAgentRuns = [];
 		activeAgentRunId = null;
 		agentProbed = false;
+		clearAgentContext();
 		citationBasket.clear();
 		renderCitationSummary();
 		clearRelated();
@@ -2956,6 +2965,7 @@ async function openLibraryDocument(hit) {
 			relativePath: hit.relative_path,
 			uri: data.uri || null,
 		});
+		clearAgentContext();
 		editor.readOnly = true;
 		editor.classList.add("readonly");
 		editorPaneLabel.textContent = "READ ONLY · LIBRARY";
@@ -2986,6 +2996,7 @@ function showDocument(path, name, text, row) {
 	currentFile = path;
 	currentLibraryDocument = null;
 	currentAgentDocument = null;
+	clearAgentContext();
 	recordSurface({ type: "workspace", uri: path });
 	editor.readOnly = false;
 	editor.classList.remove("readonly");
@@ -3713,6 +3724,7 @@ function showAgentDocument(data) {
 		uri: data.uri || null,
 		parentWorkId: null,
 	});
+	clearAgentContext();
 	// Agent Work 是中栏 Markdown Surface：退出 Work Surface（仍在「工作」标签）
 	workSurfaceActive = false;
 	editor.readOnly = false;
@@ -4152,6 +4164,20 @@ async function submitAgentQuestion(event) {
 	agentBusy = true;
 	agentCancelRequested = false;
 	if (workMode && legacyAgentView) renderAgentWorks();
+	// M4：assist 提交即把右栏切到 Agent Context，回答不离开当前文档。
+	if (mode === "assist") {
+		lastAgentAnswer = {
+			state: "running",
+			runId: run.id,
+			instruction,
+			text: "",
+			originUri: request.originUri || null,
+			originQuote: request.originQuote || null,
+			error: null,
+		};
+		setAnnotateVisible(true);
+		setSupportView("agent");
+	}
 	saveStateEl.textContent =
 		mode === "work" ? "Agent 工作运行中…" : "Agent 思考中…";
 	saveStateEl.classList.remove("error");
@@ -4202,14 +4228,14 @@ async function submitAgentQuestion(event) {
 		}
 		if (agentCancelRequested) throw new Error("Agent 已停止");
 		if (mode === "assist") {
-			// assist：不创建 Work / Agent Work Artifact。回答进入 Answer Card，
-			// 由人决定插入正文、保存为文档或委派成工作；运行收据保留 evidence。
-			showAgentAnswerCard({
-				instruction,
-				text: terminal.text,
-				originUri: request.originUri,
-				originQuote: request.originQuote,
-			});
+			// assist：不创建 Work / Agent Work Artifact。回答投影在右栏
+			// Agent Context，由人决定插入正文、保存为笔记或委派成工作；
+			// 运行收据保留 evidence。
+			if (lastAgentAnswer?.runId === run.id) {
+				lastAgentAnswer.state = "done";
+				lastAgentAnswer.text = String(terminal.text || "");
+				if (supportView === "agent") renderAgentContext();
+			}
 			saveStateEl.textContent = "Agent 回答已生成";
 		} else {
 			const title = run.title;
@@ -4242,6 +4268,16 @@ async function submitAgentQuestion(event) {
 		}
 		if (workMode && legacyAgentView) renderAgentWorks();
 		if (mode === "work" && workMode) void loadWorks();
+		// assist 失败：右栏 Agent Context 显示失败与证据指引（不落 Work）
+		if (
+			mode === "assist" &&
+			lastAgentAnswer?.runId === run.id &&
+			!agentCancelRequested
+		) {
+			lastAgentAnswer.state = "failed";
+			lastAgentAnswer.error = shortAgentError(error);
+			if (supportView === "agent") renderAgentContext();
+		}
 		markError(
 			agentCancelRequested
 				? "Agent 已停止"
@@ -4258,38 +4294,138 @@ async function submitAgentQuestion(event) {
 }
 
 // ---------------------------------------------------------------------------
-// Answer Card（M4 assist 结果）：显示回答并给出人的处置动作。
-// assist 不落 Work / Artifact；「插入正文 / 保存为文档 / 委派成工作」
-// 都是显式动作。「继续问」等 Session 连续性属于 M5。
+// Agent Context View（M4 assist 结果）：右栏第四个 Context 视图。
+// 复用批注栏的位置与交互范式，但语义独立：批注是 Human-authored durable
+// annotation，Agent 回答挂在当前文档/选区的 Context 上，不落 Work、
+// 不写进 Annotation schema。「继续问」需要 M5 Session 连续性。
 // ---------------------------------------------------------------------------
 
-function showAgentAnswerCard({ instruction, text, originUri, originQuote }) {
-	lastAgentAnswer = {
-		instruction,
-		text: String(text || ""),
-		originUri: originUri || null,
-		originQuote: originQuote || null,
-	};
-	agentAnswerTitle.textContent = `Agent · ${agentWorkTitle(instruction)}`;
-	agentAnswerContext.hidden = !lastAgentAnswer.originQuote;
-	agentAnswerQuote.textContent = lastAgentAnswer.originQuote || "";
-	agentAnswerBody.replaceChildren();
-	// 复用阅读区渲染管线：renderMarkdown + sanitizeHtml，回答以正常
-	// Markdown 排版投影，不受信任输入先经消毒。
-	const doc = sanitizeHtml(
-		renderMarkdown(lastAgentAnswer.text || "（没有返回正文）"),
-	);
-	agentAnswerBody.replaceChildren(...doc.body.childNodes);
-	void hydrateLocalPreviewImages(agentAnswerBody);
-	// 插入正文只对可编辑的 Workspace 文档有意义
+function renderAgentContext() {
+	agentStream.replaceChildren();
+	if (!lastAgentAnswer) {
+		const tip = document.createElement("div");
+		tip.className = "related-empty";
+		tip.textContent =
+			"选中字句后「问 Agent」，回答会停在这里，不打断当前文档。";
+		agentStream.appendChild(tip);
+		return;
+	}
+	const card = document.createElement("article");
+	card.className = "agent-context-card";
+	const label = document.createElement("div");
+	label.className = "agent-context-label";
+	label.textContent =
+		lastAgentAnswer.state === "running"
+			? "Agent 正在针对以下内容回答…"
+			: "针对选中的内容";
+	card.appendChild(label);
+	if (lastAgentAnswer.originQuote) {
+		const quote = document.createElement("blockquote");
+		quote.className = "agent-context-quote";
+		quote.textContent = lastAgentAnswer.originQuote;
+		card.appendChild(quote);
+	}
+	if (lastAgentAnswer.state === "running") {
+		const status = document.createElement("div");
+		status.className = "agent-context-status";
+		status.textContent = "生成中…";
+		card.appendChild(status);
+		const run = localAgentRuns.find(
+			(item) => item.id === lastAgentAnswer.runId,
+		);
+		if (run?.streamText) {
+			const preview = document.createElement("pre");
+			preview.className = "agent-context-preview";
+			preview.textContent = run.streamText.slice(-600);
+			card.appendChild(preview);
+		}
+	} else if (lastAgentAnswer.state === "failed") {
+		const status = document.createElement("div");
+		status.className = "agent-context-status agent-context-error";
+		status.textContent = `回答失败：${lastAgentAnswer.error || "未知错误"}`;
+		card.appendChild(status);
+		const hint = document.createElement("div");
+		hint.className = "agent-context-hint";
+		hint.textContent = "运行收据已保留，可在失败记录里查看证据。";
+		card.appendChild(hint);
+	} else {
+		const body = document.createElement("div");
+		body.className = "agent-context-body";
+		// 复用阅读区渲染管线：renderMarkdown + sanitizeHtml。
+		const doc = sanitizeHtml(
+			renderMarkdown(lastAgentAnswer.text || "（没有返回正文）"),
+		);
+		body.replaceChildren(...doc.body.childNodes);
+		void hydrateLocalPreviewImages(body);
+		card.appendChild(body);
+	}
+	card.appendChild(agentContextActions());
+	// 仅当用户本就接近底部时跟随滚动，避免流式刷新把人拽离正在读的位置。
+	const nearBottom =
+		agentStream.scrollHeight - agentStream.scrollTop - agentStream.clientHeight <
+		40;
+	agentStream.appendChild(card);
+	if (nearBottom) agentStream.scrollTop = agentStream.scrollHeight;
+}
+
+function agentContextActions() {
+	const actions = document.createElement("div");
+	actions.className = "agent-context-actions";
+	if (lastAgentAnswer.state === "running") return actions;
+	const done = lastAgentAnswer.state === "done";
+	const continueAsk = document.createElement("button");
+	continueAsk.type = "button";
+	continueAsk.className = "text-btn agent-context-action";
+	continueAsk.textContent = "继续问";
+	continueAsk.disabled = true; // M5 Session 连续性后开放
+	continueAsk.title = "Session 连续性（M5）后可用";
+	actions.appendChild(continueAsk);
+	const insert = document.createElement("button");
+	insert.type = "button";
+	insert.className = "text-btn agent-context-action";
+	insert.textContent = "插入正文";
 	const canInsert = Boolean(currentFile) && !editor.readOnly;
-	agentAnswerInsert.disabled = !canInsert;
-	agentAnswerInsert.title = canInsert
+	insert.disabled = !canInsert;
+	insert.title = canInsert
 		? "把回答插入当前文档光标处"
 		: "需要先打开一个可编辑的 Workspace 文档";
-	agentAnswerSaveDoc.disabled = !rootPath;
-	agentAnswerDelegate.disabled = false;
-	agentAnswerDialog.showModal();
+	insert.addEventListener("click", insertAgentAnswerIntoDocument);
+	actions.appendChild(insert);
+	const save = document.createElement("button");
+	save.type = "button";
+	save.className = "text-btn agent-context-action";
+	save.textContent = "保存为笔记";
+	save.disabled = !rootPath;
+	save.title = "把回答存为 Workspace Markdown 文档";
+	save.addEventListener("click", () => void saveAgentAnswerAsNote());
+	actions.appendChild(save);
+	const delegate = document.createElement("button");
+	delegate.type = "button";
+	delegate.className = "text-btn agent-context-action";
+	delegate.textContent = "委派成工作";
+	delegate.disabled = !done;
+	delegate.title = done
+		? "以这条提问的原始要求发起显式委派（创建 Work）"
+		: "回答生成完成后可用";
+	delegate.addEventListener("click", delegateAgentAnswerToWork);
+	actions.appendChild(delegate);
+	return actions;
+}
+
+// 流式回答期间节流重渲染，避免 message_update 高频重建 DOM。
+function scheduleAgentContextRender() {
+	if (agentContextRenderTimer) return;
+	agentContextRenderTimer = setTimeout(() => {
+		agentContextRenderTimer = null;
+		if (supportView === "agent") renderAgentContext();
+	}, 250);
+}
+
+/// 换文档 / 换工作区时清空 Agent Context：回答锚在当时的文档选区上，
+/// 不跨文档残留（切视图不丢，见 renderAgentContext）。
+function clearAgentContext() {
+	lastAgentAnswer = null;
+	if (supportView === "agent") setSupportView("annotation");
 }
 
 /// 把回答文本插入当前文档光标/选区处，随后触发常规保存/预览管线。
@@ -4299,15 +4435,14 @@ function insertAgentAnswerIntoDocument() {
 	editor.setRangeText(text, editor.selectionStart, editor.selectionEnd, "end");
 	editor.focus();
 	editor.dispatchEvent(new Event("input", { bubbles: true }));
-	agentAnswerDialog.close();
 	saveStateEl.textContent = "已插入正文";
 }
 
 /// 回答另存为 Workspace Markdown 文档（人的显式动作，不自动落任何对象）。
-async function saveAgentAnswerAsDocument() {
+async function saveAgentAnswerAsNote() {
 	if (!lastAgentAnswer || !rootPath) return;
 	const title = agentWorkTitle(lastAgentAnswer.instruction);
-	const suggested = `${title.replace(/[\\/:*?"<>|]/g, "-").slice(0, 40) || "agent-answer"}.md`;
+	const suggested = `${title.replace(/[\\/:*?"<>|]/g, "-").slice(0, 40) || "agent-note"}.md`;
 	try {
 		const path = await invoke("create_markdown", { relativePath: suggested });
 		await invoke("write_markdown", {
@@ -4316,11 +4451,10 @@ async function saveAgentAnswerAsDocument() {
 		});
 		await refreshTree();
 		await openFile(path, basename(path));
-		agentAnswerDialog.close();
-		saveStateEl.textContent = "已保存为文档";
+		saveStateEl.textContent = "已保存为笔记";
 	} catch (error) {
 		console.error(error);
-		markError("保存为文档失败");
+		markError("保存为笔记失败");
 	}
 }
 
@@ -4329,7 +4463,6 @@ async function saveAgentAnswerAsDocument() {
 function delegateAgentAnswerToWork() {
 	if (!lastAgentAnswer) return;
 	const { instruction, originUri, originQuote } = lastAgentAnswer;
-	agentAnswerDialog.close();
 	openAgentAskComposer({
 		mode: "work",
 		originUri,
@@ -6158,12 +6291,7 @@ agentAskCancel.addEventListener("click", () => {
 	pendingAgentRequest = null;
 	agentAskDialog.close();
 });
-agentAnswerInsert.addEventListener("click", insertAgentAnswerIntoDocument);
-agentAnswerSaveDoc.addEventListener("click", () =>
-	void saveAgentAnswerAsDocument(),
-);
-agentAnswerDelegate.addEventListener("click", delegateAgentAnswerToWork);
-agentAnswerClose.addEventListener("click", () => agentAnswerDialog.close());
+agentViewButton.addEventListener("click", () => setSupportView("agent"));
 annotationButton.addEventListener("click", () => {
 	const hasSelection = editor.selectionStart !== editor.selectionEnd;
 	if (hasSelection) beginAnnotation(captureEditorAnnotation());

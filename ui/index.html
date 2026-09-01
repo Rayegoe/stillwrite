@@ -506,6 +506,16 @@
               </button>
               <button
                 class="support-view-tab"
+                id="agentViewButton"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="agentStream"
+              >
+                Agent
+              </button>
+              <button
+                class="support-view-tab"
                 id="workContextViewButton"
                 type="button"
                 role="tab"
@@ -587,6 +597,7 @@
             id="webSearchStream"
             hidden
           ></div>
+          <div class="related-stream agent-stream" id="agentStream" hidden></div>
           <div
             class="related-stream work-context-stream"
             id="workContextStream"
@@ -746,35 +757,6 @@
           </button>
         </div>
       </form>
-    </dialog>
-
-    <dialog id="agentAnswerDialog" class="modal agent-answer-dialog">
-      <div class="agent-answer-head">
-        <h3 id="agentAnswerTitle">Agent</h3>
-      </div>
-      <div class="agent-answer-context" id="agentAnswerContext" hidden>
-        <div class="agent-ask-context-label">针对选区</div>
-        <blockquote id="agentAnswerQuote"></blockquote>
-      </div>
-      <div
-        class="agent-answer-body work-prewrap"
-        id="agentAnswerBody"
-        aria-live="polite"
-      ></div>
-      <div class="modal-actions agent-answer-actions">
-        <button type="button" class="text-btn" id="agentAnswerInsert">
-          插入正文
-        </button>
-        <button type="button" class="text-btn" id="agentAnswerSaveDoc">
-          保存为文档
-        </button>
-        <button type="button" class="text-btn" id="agentAnswerDelegate">
-          委派成工作
-        </button>
-        <button type="button" class="primary-btn" id="agentAnswerClose">
-          关闭
-        </button>
-      </div>
     </dialog>
 
     <div class="selection-actions" id="selectionActions" hidden>

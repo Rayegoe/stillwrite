@@ -375,6 +375,6 @@ merge / push / release / replace active version 保留明确人类边界。
 
 路线以 `stillwrite-final-business-spec-v2.0-m3-continuation` 为准：M3（Workbench Shell）已落地，当前 P0 为 M4 → M5 → M6；M7/M8 必须在真实使用暴露对应问题后才施工（Stop rule）。
 
-**状态（2026-09，M4 交付）：** Interaction Contract Reset 完成——`agent_start` 契约拆为 `mode(assist|work) + instruction + context`，runtime input 由 backend 组装；assist 不再创建 Work（receipt 保留作 evidence）；`Work.intent` 恢复为人的原始 instruction；启动从硬编码 Work Home 改为 Resume Last Human Context（上次 Surface → 最近可用 Workspace 文档 → Work Home）；assist 结果以 Answer Card 呈现（插入正文 / 保存为文档 / 委派成工作）。见 `docs/M4_ACCEPTANCE.md`（L3 真人 gate 待跑）。下一步是 M5：Durable Agent Session（`agent_sessions` 最小索引 + 继续问），不引入 Chat 主界面。
+**状态（2026-09，M4 交付）：** Interaction Contract Reset 完成——`agent_start` 契约拆为 `mode(assist|work) + instruction + context`，runtime input 由 backend 组装；assist 不再创建 Work（receipt 保留作 evidence）；`Work.intent` 恢复为人的原始 instruction；启动从硬编码 Work Home 改为 Resume Last Human Context（上次 Surface → 最近可用 Workspace 文档 → Work Home）；assist 回答投影为右栏第四个 Context 视图 `批注|关联|搜索|Agent`（复用支持栏范式，不写进 Annotation schema；插入正文 / 保存为笔记 / 委派成工作，「继续问」留 M5）。见 `docs/M4_ACCEPTANCE.md`（L3 真人 gate 待跑）。下一步是 M5：Durable Agent Session（`agent_sessions` 最小索引 + 继续问），不引入 Chat 主界面。
 
 完成 A 系列、证明 Work/Run/Artifact 能在一个窗口中被监督后，再进入 Thread、Memory、Library 推荐、RSS 智能或 Self-Evolution。
