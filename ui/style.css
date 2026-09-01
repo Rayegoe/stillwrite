@@ -2106,13 +2106,32 @@ body.margin-fixed .shell[data-mode="reader"] .markdown-body > * {
 	color: var(--muted);
 	font-size: 11px;
 }
-/* M4 Agent Context View：右栏第四个 Context 视图（批注|关联|搜索|Agent）。
-   复用支持栏卡片范式，不伪装成批注；回答正文用阅读区渲染管线输出。 */
+/* M5 Agent Pane：右栏第四个 Context 视图（批注|关联|搜索|Agent）。
+   durable thread 投影：当前会话（turns + 继续问）/ 相关会话 / 最近会话。
+   复用支持栏范式，不伪装成批注；回答正文用阅读区渲染管线输出。 */
 .agent-stream {
 	overflow: auto;
 	padding: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
 }
-.agent-context-card {
+.agent-pane-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+.agent-pane-title {
+	color: var(--muted);
+	font-size: 10px;
+	letter-spacing: 0.08em;
+}
+.agent-pane-tip {
+	font-size: 12px;
+	line-height: 1.7;
+}
+.agent-thread {
 	display: flex;
 	flex-direction: column;
 	gap: 10px;
@@ -2121,10 +2140,106 @@ body.margin-fixed .shell[data-mode="reader"] .markdown-body > * {
 	border-radius: 10px;
 	background: rgba(222, 205, 170, 0.12);
 }
-.agent-context-label {
+.agent-thread-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+}
+.agent-thread-title {
+	font-weight: 600;
+	font-size: 12.5px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.agent-thread-meta {
+	color: var(--muted);
+	font-size: 10.5px;
+	white-space: nowrap;
+}
+.agent-turn {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding-top: 8px;
+	border-top: 1px dashed rgba(121, 95, 53, 0.16);
+}
+.agent-turn-label {
 	color: var(--muted);
 	font-size: 10px;
 	letter-spacing: 0.06em;
+}
+.agent-turn-instruction {
+	font-size: 12.5px;
+	line-height: 1.6;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+.agent-turn-answer-label {
+	margin-top: 4px;
+}
+.agent-thread-composer {
+	display: flex;
+	align-items: flex-end;
+	gap: 6px;
+	margin-top: 4px;
+}
+.agent-thread-composer textarea {
+	flex: 1;
+	resize: none;
+	padding: 6px 8px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: transparent;
+	color: var(--ink);
+	font-family: inherit;
+	font-size: 12px;
+	line-height: 1.5;
+}
+.agent-thread-send {
+	white-space: nowrap;
+}
+.agent-session-group {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.agent-session-group-title {
+	color: var(--muted);
+	font-size: 10px;
+	letter-spacing: 0.08em;
+}
+.agent-session-row {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 8px 10px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: transparent;
+	color: var(--ink);
+	font-size: 12px;
+	text-align: left;
+	cursor: pointer;
+}
+.agent-session-row:hover {
+	background: var(--hover);
+}
+.agent-session-row.live {
+	border-color: #b8863b;
+	background: rgba(222, 205, 170, 0.2);
+}
+.agent-session-row-title {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.agent-session-row-meta {
+	color: var(--muted);
+	font-size: 10.5px;
+	white-space: nowrap;
 }
 .agent-context-quote {
 	max-height: 120px;
@@ -2170,17 +2285,6 @@ body.margin-fixed .shell[data-mode="reader"] .markdown-body > * {
 }
 .agent-context-error {
 	color: #a04b2f;
-}
-.agent-context-preview {
-	max-height: 140px;
-	overflow: auto;
-	margin: 0;
-	padding: 8px;
-	border-radius: 6px;
-	background: rgba(0, 0, 0, 0.05);
-	font-size: 11.5px;
-	line-height: 1.6;
-	white-space: pre-wrap;
 }
 .agent-context-hint {
 	color: var(--muted);

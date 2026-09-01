@@ -23,9 +23,9 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::state_store::ActorKind;
+use crate::state_store::{ActorKind, ObjectUri};
 use crate::work::{self, WorkStatus};
-use crate::{agent_work, atomic_write, workspace_root, AppState};
+use crate::{agent_session, agent_work, atomic_write, workspace_root, AppState};
 
 const MAX_RPC_RECORD_SIZE: usize = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
@@ -123,10 +123,10 @@ struct RpcResponse {
     error: Option<Value>,
 }
 
-/// Agent 请求契约（M4 Interaction Contract Reset）：
+/// Agent 请求契约（M4 Interaction Contract Reset / M5 Thread）：
 /// `instruction` 是人的原始要求；`context` 是当前文档/选区/引用的
-/// 结构化或已编译输入；`mode` 决定是否落地 durable Work。
-/// 三者不得再拼成一个 `prompt` 领域字段。
+/// 结构化或已编译输入；`mode` 决定是否落地 durable Work；
+/// `session_id` 指向 durable Agent Session（继续问 = 同 Session 新 Run）。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStartInput {
@@ -138,6 +138,8 @@ pub struct AgentStartInput {
     pub title: Option<String>,
     #[serde(default)]
     pub context: Option<AgentRequestContext>,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,8 +163,9 @@ impl AgentMode {
     }
 }
 
-/// 请求上下文（M4 最小集）。引用资料目前仍由 frontend 编译成文本传入；
-/// M7 Context Compiler 落地后 `citation_context` 由 backend 自取。
+/// 请求上下文（M4 最小集；M5 起引用资料以 URI 列表随行，落 turn context set）。
+/// 引用资料的编译文本目前仍由 frontend 传入；M7 Context Compiler 落地后
+/// `citation_context` 由 backend 自取。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRequestContext {
@@ -172,15 +175,29 @@ pub struct AgentRequestContext {
     pub origin_quote: Option<String>,
     #[serde(default)]
     pub citation_context: Option<String>,
+    #[serde(default)]
+    pub reference_uris: Vec<String>,
+}
+
+/// 会话历史在 runtime input 中的单条投影（compose 用纯结构，便于测试）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryTurn {
+    pub role: String,
+    pub content: String,
 }
 
 /// 组装发给 Pi 的 runtime input。它只是执行输入，不是领域意图：
-/// Work intent 只保存 `instruction` 原文。
-fn compose_runtime_message(instruction: &str, context: Option<&AgentRequestContext>) -> String {
+/// Work intent 只保存 `instruction` 原文；会话历史是 thread 的投影窗口。
+fn compose_runtime_message(
+    instruction: &str,
+    context: Option<&AgentRequestContext>,
+    history: &[HistoryTurn],
+) -> String {
     let empty = AgentRequestContext {
         origin_uri: None,
         origin_quote: None,
         citation_context: None,
+        reference_uris: vec![],
     };
     let context = context.unwrap_or(&empty);
     let source = match context.origin_uri.as_deref() {
@@ -199,13 +216,32 @@ fn compose_runtime_message(instruction: &str, context: Option<&AgentRequestConte
         }
         _ => "# Explicit references\n（没有显式引用资料）".to_string(),
     };
-    [
-        format!("# Current source\n{source}"),
-        format!("# Selected text\n{selected}"),
-        references,
-        format!("# User request\n{instruction}"),
-    ]
-    .join("\n\n")
+    let mut sections = vec![];
+    // 会话历史窗口：同 Session 继续问时提供连续性；新会话没有这一节。
+    if !history.is_empty() {
+        const TURN_CHARS: usize = 1600;
+        let turns: Vec<String> = history
+            .iter()
+            .map(|turn| {
+                let mut content = turn.content.trim().to_string();
+                if content.chars().count() > TURN_CHARS {
+                    content = format!("{}…", content.chars().take(TURN_CHARS).collect::<String>());
+                }
+                let speaker = if turn.role == "user" {
+                    "用户"
+                } else {
+                    "Agent"
+                };
+                format!("{speaker}：{content}")
+            })
+            .collect();
+        sections.push(format!("# Conversation so far\n{}", turns.join("\n\n")));
+    }
+    sections.push(format!("# Current source\n{source}"));
+    sections.push(format!("# Selected text\n{selected}"));
+    sections.push(references);
+    sections.push(format!("# User request\n{instruction}"));
+    sections.join("\n\n")
 }
 
 #[derive(Serialize)]
@@ -757,6 +793,14 @@ fn journal_pipeline_event(app: &AppHandle, streaming_runs: &Mutex<HashSet<String
             if let Some(session_ref) = object.get("piSessionRef").and_then(Value::as_str) {
                 fields.insert("piSessionRef".into(), json!(session_ref));
             }
+            // M5 thread：settle 即把最终回答落为 durable assistant message。
+            // settle 在这里只做一次；重放/重复事件被 run 唯一索引幂等吸收，
+            // UI 不再"重新播放"已流式展示的内容。
+            if let Some(text) = object.get("text").and_then(Value::as_str) {
+                if let Err(error) = record_assistant_message(app, run_id, text) {
+                    eprintln!("落 agent 回答失败 (run {run_id}): {error}");
+                }
+            }
         }
         "agent_stopped" => {
             fields.insert("stage".into(), json!("STOPPED"));
@@ -787,6 +831,36 @@ fn emit_direct_event(
         .map(|message| vec![("message".into(), Value::String(message))])
         .unwrap_or_default();
     process.emit_run_event(run_id, event_type, fields);
+}
+
+/// M5：settle 侧把最终回答落为 durable assistant message。
+/// run 没有 thread（旧路径 / 无 session 的 assist）时静默跳过；
+/// 重复 settle 由 run 唯一索引幂等吸收。
+fn record_assistant_message(app: &AppHandle, run_id: &str, text: &str) -> Result<(), String> {
+    let content = text.trim();
+    if content.is_empty() {
+        return Ok(());
+    }
+    let mut conn = crate::open_durable_state(app)?;
+    let Some(user_message) = agent_session::find_user_message_by_run(&conn, run_id)? else {
+        return Ok(());
+    };
+    if agent_session::find_assistant_message_by_run(&conn, run_id)?.is_some() {
+        return Ok(());
+    }
+    agent_session::append_message(
+        &mut conn,
+        agent_session::NewAgentMessage {
+            session_id: user_message.session_id,
+            role: agent_session::AgentMessageRole::Assistant,
+            content: content.to_string(),
+            run_ref: Some(run_id.to_string()),
+            origin_uri: None,
+            quote_snapshot: None,
+            context_item_uris: vec![],
+        },
+    )?;
+    Ok(())
 }
 
 const RECEIPT_STDERR_TAIL_CHARS: usize = 1024;
@@ -1665,13 +1739,65 @@ pub async fn agent_start(
     };
     let run_id = input.run_id;
     let root = workspace_root(&state)?;
-    // Work 桥接第一步（仅 work 模式）：Pi 请求成立即落地 durable Work
+    // M5 thread 桥（先于一切执行）：session_id 存在 → 先落 user message
+    // （含来源/引文快照 + turn context set）。落库失败则整个请求失败——
+    // 没有进入认知线的提问不允许发出。
+    let session_id = input
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    let mut user_message_id: Option<String> = None;
+    if let Some(session_id) = &session_id {
+        let mut conn = crate::open_durable_state(&app)?;
+        let context = input.context.as_ref();
+        let origin_uri = context
+            .and_then(|c| c.origin_uri.as_deref())
+            .map(str::trim)
+            .filter(|uri| !uri.is_empty());
+        let quote_snapshot = context
+            .and_then(|c| c.origin_quote.as_deref())
+            .map(str::trim)
+            .filter(|quote| !quote.is_empty());
+        let mut context_item_uris = Vec::new();
+        if let Some(uri) = origin_uri {
+            if let Ok(parsed) = ObjectUri::parse(uri) {
+                context_item_uris.push(parsed);
+            }
+        }
+        if let Some(context) = context {
+            for uri in &context.reference_uris {
+                let uri = uri.trim();
+                if uri.is_empty() {
+                    continue;
+                }
+                if let Ok(parsed) = ObjectUri::parse(uri) {
+                    context_item_uris.push(parsed);
+                }
+            }
+        }
+        let message = agent_session::append_message(
+            &mut conn,
+            agent_session::NewAgentMessage {
+                session_id: session_id.clone(),
+                role: agent_session::AgentMessageRole::User,
+                content: instruction.clone(),
+                run_ref: Some(run_id.clone()),
+                origin_uri: origin_uri.map(str::to_string),
+                quote_snapshot: quote_snapshot.map(str::to_string),
+                context_item_uris,
+            },
+        )?;
+        user_message_id = Some(message.id);
+    }
+    // Work 桥接（仅 work 模式）：Pi 请求成立即落地 durable Work
     // （queued，receipt_ref=run id）。`intent` 是人的原始 instruction；
     // 拼接后的 runtime input 不再进入领域字段。创建失败则整个请求失败
     // ——没有 durable 记录的委派不允许发生。
     if mode == AgentMode::Work {
         let mut conn = crate::open_durable_state(&app)?;
-        work::create_work(
+        let work = work::create_work(
             &mut conn,
             work::NewWork {
                 workspace_id: Some(crate::workspace_id_for_root(&root)),
@@ -1680,8 +1806,44 @@ pub async fn agent_start(
                 receipt_ref: Some(run_id.clone()),
             },
         )?;
+        // M5.5 认知链：这条提问若是 thread 里的委派，记录 message → work
+        // （promoted_to）。链接失败只留 stderr 痕迹，不回滚委派本身。
+        if let Some(message_id) = &user_message_id {
+            let workspace_id = crate::workspace_id_for_root(&root);
+            if let Err(error) = agent_session::link_message_outcome(
+                &mut conn,
+                message_id,
+                agent_session::OutcomePredicate::PromotedTo,
+                ObjectUri::work(&work.id),
+                Some(workspace_id),
+            ) {
+                eprintln!("记录 promoted_to 关系失败: {error}");
+            }
+        }
     }
-    let message = compose_runtime_message(&instruction, input.context.as_ref());
+    // 会话历史窗口（同 Session 继续问的连续性投影）：不含本轮刚落的
+    // user message——instruction 单独成段。
+    let history = match &session_id {
+        Some(session_id) => {
+            let conn = crate::open_durable_state(&app)?;
+            let mut turns = agent_session::recent_history(&conn, session_id).unwrap_or_default();
+            if turns
+                .last()
+                .is_some_and(|m| m.role == agent_session::AgentMessageRole::User)
+            {
+                turns.pop();
+            }
+            turns
+                .into_iter()
+                .map(|m| HistoryTurn {
+                    role: m.role.as_str().to_string(),
+                    content: m.content,
+                })
+                .collect()
+        }
+        None => vec![],
+    };
+    let message = compose_runtime_message(&instruction, input.context.as_ref(), &history);
     let process = PiProcessState::from_store(Arc::clone(&process.store));
     tauri::async_runtime::spawn_blocking(move || {
         // 状态链：STARTING_PI → PI_READY → SESSION_ALLOCATED → PROMPT_SENT，
@@ -1744,6 +1906,24 @@ pub async fn agent_start(
                     "title": title,
                 }),
             );
+            // M5 thread：把 provider 侧信息回写到 durable session（尽力而为）。
+            if let Some(session_id) = &session_id {
+                let provider_label = match (provider.clone(), model.clone()) {
+                    (Some(p), Some(m)) => Some(format!("{p}/{m}")),
+                    (Some(p), None) => Some(p),
+                    _ => None,
+                };
+                let session_id = session_id.clone();
+                let provider_session_ref = session_ref.clone();
+                if let Ok(mut conn) = crate::open_durable_state(&app) {
+                    let _ = agent_session::set_session_provider(
+                        &mut conn,
+                        &session_id,
+                        provider_label.as_deref(),
+                        provider_session_ref.as_deref(),
+                    );
+                }
+            }
             child.begin_run(ActiveRun {
                 run_id: run_id.clone(),
                 session_ref: session_ref.clone(),
@@ -2027,15 +2207,16 @@ mod tests {
             origin_uri: Some("workspace:///notes/a.md".into()),
             origin_quote: Some("第一行\n第二行".into()),
             citation_context: Some("### 资料 A\n内容".into()),
+            reference_uris: vec![],
         };
-        let message = compose_runtime_message("查证这个判断", Some(&context));
+        let message = compose_runtime_message("查证这个判断", Some(&context), &[]);
         assert!(message.contains("# Current source\nworkspace:///notes/a.md"));
         assert!(message.contains("# Selected text\n> 第一行\n> 第二行"));
         assert!(message.contains("# Explicit references\n### 资料 A"));
         // instruction 原文完整出现在 User request 段，且不被 host context 拼接改写
         assert!(message.ends_with("# User request\n查证这个判断"));
         assert_eq!(
-            compose_runtime_message("只问一句", None),
+            compose_runtime_message("只问一句", None, &[]),
             [
                 "# Current source\n（当前工作没有明确来源文档）",
                 "# Selected text\n（没有选中文本）",
@@ -2049,11 +2230,45 @@ mod tests {
             origin_uri: Some("  ".into()),
             origin_quote: Some("".into()),
             citation_context: Some("".into()),
+            reference_uris: vec![],
         };
-        let message = compose_runtime_message("问", Some(&blank));
+        let message = compose_runtime_message("问", Some(&blank), &[]);
         assert!(message.contains("# Current source\n（当前工作没有明确来源文档）"));
         assert!(message.contains("# Selected text\n（没有选中文本）"));
         assert!(message.contains("# Explicit references\n（没有显式引用资料）"));
+        // 新会话没有历史节
+        assert!(!message.contains("# Conversation so far"));
+    }
+
+    #[test]
+    fn runtime_message_projects_history_window_without_replacing_instruction() {
+        let history = vec![
+            HistoryTurn {
+                role: "user".into(),
+                content: "Work-first 有什么问题？".into(),
+            },
+            HistoryTurn {
+                role: "assistant".into(),
+                content: "它把协调层提升成了主交互面。".into(),
+            },
+        ];
+        let message = compose_runtime_message("那 Work 应该放在哪里？", None, &history);
+        assert!(message.contains("# Conversation so far"));
+        assert!(message.contains("用户：Work-first 有什么问题？"));
+        assert!(message.contains("Agent：它把协调层提升成了主交互面。"));
+        // 历史在来源与指令之前，instruction 仍是最后的原文段
+        let history_pos = message.find("# Conversation so far").unwrap();
+        let instruction_pos = message.find("# User request").unwrap();
+        assert!(history_pos < instruction_pos);
+        assert!(message.ends_with("# User request\n那 Work 应该放在哪里？"));
+        // 超长历史条目被截断，不在 runtime input 里无限膨胀
+        let long = HistoryTurn {
+            role: "assistant".into(),
+            content: "长".repeat(4000),
+        };
+        let message = compose_runtime_message("问", None, &[long]);
+        assert!(message.contains("…"));
+        assert!(message.chars().count() < 6000);
     }
 
     #[test]

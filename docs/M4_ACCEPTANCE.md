@@ -69,8 +69,13 @@ agent_start input = {
 6. [ ] 可保存为文档/笔记（生成 Workspace md 并打开）。
 7. [ ] 可委派成 Work（composer 预填原始 instruction，委派后恰新增 1 个 Work）。
 8. [ ] 切回「批注」再切回「Agent」，回答仍保留在当前界面状态。
-9. [ ] `继续问` 按钮存在且置灰（M5 Session 后开放）。
+9. [x] `继续问`——已由 M5（Durable Agent Thread）兑现为 thread composer，
+   见 `docs/M5_ACCEPTANCE.md`。
 10. [ ] 不修改 Annotation schema（回答不出现在批注列表/批注文件中）。
+
+> 2026-09-01 M5 修正：右栏 Agent 的数据源已从临时 `lastAgentAnswer` 升级为
+> durable `agent_sessions`/`agent_messages`；切文档不再清空回答，只重排
+> 相关/最近会话。第 8 条由 durable thread 天然满足。
 
 另验（M4 原有 gate）：
 

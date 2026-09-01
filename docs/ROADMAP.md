@@ -375,6 +375,8 @@ merge / push / release / replace active version 保留明确人类边界。
 
 路线以 `stillwrite-final-business-spec-v2.0-m3-continuation` 为准：M3（Workbench Shell）已落地，当前 P0 为 M4 → M5 → M6；M7/M8 必须在真实使用暴露对应问题后才施工（Stop rule）。
 
-**状态（2026-09，M4 交付）：** Interaction Contract Reset 完成——`agent_start` 契约拆为 `mode(assist|work) + instruction + context`，runtime input 由 backend 组装；assist 不再创建 Work（receipt 保留作 evidence）；`Work.intent` 恢复为人的原始 instruction；启动从硬编码 Work Home 改为 Resume Last Human Context（上次 Surface → 最近可用 Workspace 文档 → Work Home）；assist 回答投影为右栏第四个 Context 视图 `批注|关联|搜索|Agent`（复用支持栏范式，不写进 Annotation schema；插入正文 / 保存为笔记 / 委派成工作，「继续问」留 M5）。见 `docs/M4_ACCEPTANCE.md`（L3 真人 gate 待跑）。下一步是 M5：Durable Agent Session（`agent_sessions` 最小索引 + 继续问），不引入 Chat 主界面。
+**状态（2026-09，M4 交付）：** Interaction Contract Reset 完成——`agent_start` 契约拆为 `mode(assist|work) + instruction + context`，runtime input 由 backend 组装；assist 不再创建 Work（receipt 保留作 evidence）；`Work.intent` 恢复为人的原始 instruction；启动从硬编码 Work Home 改为 Resume Last Human Context（上次 Surface → 最近可用 Workspace 文档 → Work Home）；assist 回答投影为右栏第四个 Context 视图 `批注|关联|搜索|Agent`（复用支持栏范式，不写进 Annotation schema）。见 `docs/M4_ACCEPTANCE.md`。
+
+**状态（2026-09，M5 交付）：** M5 按真实使用暴露的问题升级为 **Durable Agent Thread & Cognitive Lineage**——(1) Streaming Integrity：chunk 即时入 buffer、rAF 合并 DOM 更新，settled 只定稿不重播；(2) schema v6 新增 `agent_sessions`/`agent_messages`，`lastAgentAnswer` 临时状态删除，回答由 backend settle 侧先落库后广播（幂等）；(3) 每 turn 保存 origin/quote snapshot/context set（复用 `context_sets.thread_id`），文档改写后历史语义不漂移；(4) 右栏 = 当前会话（thread + 继续问 composer）/ 相关会话 / 最近会话，切换文档只重排不删除，运行中会话 ambient 可见；(5) 插入/保存/委派落 `relations`（inserted_into/derived_into/promoted_to），继续问带最近 12 条历史窗口。见 `docs/M5_ACCEPTANCE.md`（L3 真人 gate 待跑）。下一步是 M6：Work Review Closure（`needs_human → running`、Artifact 打开保留 Work Review、接受/要求修改/终止）。
 
 完成 A 系列、证明 Work/Run/Artifact 能在一个窗口中被监督后，再进入 Thread、Memory、Library 推荐、RSS 智能或 Self-Evolution。

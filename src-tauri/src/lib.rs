@@ -9,6 +9,7 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+mod agent_session;
 mod agent_work;
 pub mod annotate;
 mod feeds;
@@ -1847,6 +1848,101 @@ async fn work_events(
     state_store::events_for_work(&conn, &work_id, limit.unwrap_or(20).clamp(1, 100))
 }
 
+// ---------------------------------------------------------------------------
+// Agent Session（M5 Durable Agent Thread）：thread 的命令面。
+// Session = 连续性；Message = 认知线最小事实。命令只做薄的参数校验，
+// 业务规则在 agent_session 模块内（事务 + append-only events）。
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentSessionCreateInput {
+    title: String,
+}
+
+#[tauri::command]
+async fn agent_session_create(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: AgentSessionCreateInput,
+) -> Result<agent_session::AgentSessionRecord, String> {
+    let root = workspace_root(&state)?;
+    let mut conn = open_durable_state(&app)?;
+    agent_session::create_session(
+        &mut conn,
+        agent_session::NewAgentSession {
+            workspace_id: Some(workspace_id_for_root(&root)),
+            title: input.title,
+        },
+    )
+}
+
+#[tauri::command]
+async fn agent_session_list(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<agent_session::AgentSessionSummary>, String> {
+    let root = workspace_root(&state)?;
+    let workspace_id = workspace_id_for_root(&root);
+    let conn = open_durable_state(&app)?;
+    agent_session::list_sessions(&conn, &workspace_id, 100)
+}
+
+/// 与某来源文档相关的会话（任一 turn 的 origin_uri 命中）。
+#[tauri::command]
+async fn agent_session_related(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    origin_uri: String,
+) -> Result<Vec<agent_session::AgentSessionSummary>, String> {
+    let origin_uri = origin_uri.trim().to_string();
+    if origin_uri.is_empty() {
+        return Ok(vec![]);
+    }
+    let root = workspace_root(&state)?;
+    let workspace_id = workspace_id_for_root(&root);
+    let conn = open_durable_state(&app)?;
+    agent_session::related_sessions(&conn, &workspace_id, &origin_uri, 50)
+}
+
+#[tauri::command]
+async fn agent_session_messages(
+    app: AppHandle,
+    session_id: String,
+) -> Result<Vec<agent_session::AgentMessageRecord>, String> {
+    let conn = open_durable_state(&app)?;
+    agent_session::list_messages(&conn, session_id.trim())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentOutcomeLinkInput {
+    message_id: String,
+    /// inserted_into | derived_into | promoted_to
+    action: String,
+    target_uri: String,
+}
+
+/// 人的后续动作入认知链（M5.5）：agentmsg://<id> -predicate-> target。
+#[tauri::command]
+async fn agent_message_link(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: AgentOutcomeLinkInput,
+) -> Result<(), String> {
+    let predicate = agent_session::OutcomePredicate::parse(input.action.trim())?;
+    let target_uri = ObjectUri::parse(input.target_uri.trim())?;
+    let root = workspace_root(&state)?;
+    let mut conn = open_durable_state(&app)?;
+    agent_session::link_message_outcome(
+        &mut conn,
+        input.message_id.trim(),
+        predicate,
+        target_uri,
+        Some(workspace_id_for_root(&root)),
+    )
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkReceiptProbe {
@@ -2079,6 +2175,11 @@ pub fn run() {
             work_cancel,
             work_events,
             work_receipt_probe,
+            agent_session_create,
+            agent_session_list,
+            agent_session_related,
+            agent_session_messages,
+            agent_message_link,
             read_annotation,
             save_annotation,
             aggregate_annotations,

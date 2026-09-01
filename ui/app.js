@@ -126,6 +126,7 @@ const AnnotationCodec = window.StillwriteAnnotations;
 const DocumentLinks = window.StillwriteDocumentLinks;
 const AgentEvents = window.StillwriteAgentEvents;
 const AgentRequest = window.StillwriteAgentRequest;
+const AgentThread = window.StillwriteAgentThread;
 const SurfaceResume = window.StillwriteSurfaceResume;
 const Feeds = window.StillwriteFeeds;
 const WorkView = window.StillwriteWorkView;
@@ -179,11 +180,17 @@ let feedBusy = false;
 const citationBasket = new Map();
 let agentWorkItems = [];
 let pendingAgentRequest = null;
-// 当前 Agent Context Card（右栏 agent 视图的数据源）。state:
-// running → done / failed。只活在当前界面会话，不进入 durable state；
-// 委派成工作时会用到原始 instruction。换文档/工作区即清空。
-let lastAgentAnswer = null;
-let agentContextRenderTimer = null;
+// M5 Durable Agent Thread：右栏 Agent 的真值是 durable session/message，
+// 这里只是投影缓存。activeSessionId 是展示偏好（AGENTS §2.1 允许 localStorage），
+// 换文档/工作区只影响列表排序，永不删除会话。
+let agentSessions = [];
+let agentSessionsLoaded = false;
+let agentThread = [];
+let agentThreadToken = 0;
+// 启动时为空；workspace 恢复后由 agentSessionPrefKey 按工作区读取。
+let activeSessionId = null;
+let agentPaneRenderTimer = null;
+let agentThreadComposerEl = null;
 let localAgentRuns = [];
 // 持久化运行收据里的失败记录（AppData/agent/runs），重启应用后仍可见。
 let historicAgentFailures = [];
@@ -955,7 +962,7 @@ function setSupportView(view) {
 	workEvidenceStream.hidden = !workEvidence;
 	if (related) renderRelatedPanel();
 	if (webSearch) renderWebSearchState();
-	if (agent) renderAgentContext();
+	if (agent) renderAgentPane();
 	if (workContext) renderWorkContextPanel();
 	if (workEvidence) renderWorkEvidencePanel();
 }
@@ -1386,10 +1393,10 @@ function handleAgentEvent(envelope) {
 	if (!run || !AgentEvents) return;
 	Object.assign(run, AgentEvents.applyAgentEvent(run, payload));
 	if (workMode && legacyAgentView) renderAgentWorks();
-	// Agent Context 视图随流式事件刷新（节流）；最终文本由
-	// submitAgentQuestion 的 settle 分支负责定稿渲染。
-	if (supportView === "agent" && lastAgentAnswer?.runId === runId) {
-		scheduleAgentContextRender();
+	// Agent thread 视图随流式事件刷新（rAF 合并）；最终文本由
+	// dispatchAgentRequest 的 settle 分支负责定稿（refresh thread）。
+	if (supportView === "agent" && run.sessionId === activeSessionId) {
+		scheduleAgentPaneRender();
 	}
 	if (AgentEvents.TERMINAL_EVENTS.has(payload.type)) {
 		const waiter = agentRunWaiters.get(runId);
@@ -2488,8 +2495,10 @@ async function setSidebarMode(mode) {
 	stopWorkPolling();
 	setWorkSurface(workMode);
 	updateFormatToolbarState();
-	// M4：中栏 Surface 随导航变化时更新 lastHumanSurface 投影。
+	// M4/M5：中栏 Surface 随导航变化时更新 lastHumanSurface 投影；
+	// Agent 视图只重排（相关会话置顶），不清空会话。
 	recordCurrentSurface();
+	if (supportView === "agent") scheduleAgentPaneRender();
 	if (libraryMode) {
 		if (!librarySources.length) await refreshLibrary();
 		else renderLibraryHome();
@@ -2543,7 +2552,7 @@ async function useWorkspace(data) {
 		localAgentRuns = [];
 		activeAgentRunId = null;
 		agentProbed = false;
-		clearAgentContext();
+		agentThreadComposerEl = null;
 		citationBasket.clear();
 		renderCitationSummary();
 		clearRelated();
@@ -2560,6 +2569,16 @@ async function useWorkspace(data) {
 	workSurfaceActive = false;
 	loadViewModeForCurrentDocument();
 	rootPath = data.root;
+	// M5：会话按 workspace 隔离。换工作区后重置缓存，active 会话取新
+	// 工作区自己的记忆（跨工作区的会话仍在各自工作区里，不删除）。
+	if (workspaceChanged) {
+		agentSessions = [];
+		agentSessionsLoaded = false;
+		agentThread = [];
+		activeSessionId = agentSessionPrefKey()
+			? localStorage.getItem(agentSessionPrefKey()) || null
+			: null;
+	}
 	relatedPinsHydratedScope = null; // 换工作区必须重新水合对应的固定关联
 	localStorage.setItem("stillwrite.rootPath", rootPath);
 	workspaceNameEl.textContent = basename(rootPath);
@@ -2643,6 +2662,12 @@ function recordSurface(surface) {
 	SurfaceResume.write(localStorage, surface);
 }
 
+/// active Agent 会话的记忆键：按 workspace 隔离（展示偏好，
+/// AGENTS §2.1 允许 localStorage；会话真值在 state.db）。
+function agentSessionPrefKey() {
+	return rootPath ? `stillwrite.agentSessionId:${rootPath}` : null;
+}
+
 async function surfaceStillAvailable(surface) {
 	if (!surface) return false;
 	if (surface.type === "work") {
@@ -2722,6 +2747,10 @@ async function mostRecentAvailableWorkspaceDocument() {
 
 async function resumeLastHumanSurface() {
 	await restoreWorkspace();
+	// M5：恢复该工作区上次展开的 Agent 会话（记忆为空则右栏从列表开始）
+	activeSessionId = agentSessionPrefKey()
+		? localStorage.getItem(agentSessionPrefKey()) || null
+		: null;
 	const surface = SurfaceResume.read(localStorage);
 	const surfaceAvailable = await surfaceStillAvailable(surface).catch(
 		() => false,
@@ -2965,7 +2994,8 @@ async function openLibraryDocument(hit) {
 			relativePath: hit.relative_path,
 			uri: data.uri || null,
 		});
-		clearAgentContext();
+		// M5：换文档不清会话，只让相关会话重排
+		if (supportView === "agent") scheduleAgentPaneRender();
 		editor.readOnly = true;
 		editor.classList.add("readonly");
 		editorPaneLabel.textContent = "READ ONLY · LIBRARY";
@@ -2996,8 +3026,9 @@ function showDocument(path, name, text, row) {
 	currentFile = path;
 	currentLibraryDocument = null;
 	currentAgentDocument = null;
-	clearAgentContext();
 	recordSurface({ type: "workspace", uri: path });
+	// M5：换文档不清会话，只让相关会话重排
+	if (supportView === "agent") scheduleAgentPaneRender();
 	editor.readOnly = false;
 	editor.classList.remove("readonly");
 	editorPaneLabel.textContent = "WRITE";
@@ -3724,7 +3755,8 @@ function showAgentDocument(data) {
 		uri: data.uri || null,
 		parentWorkId: null,
 	});
-	clearAgentContext();
+	// M5：换文档不清会话，只让相关会话重排
+	if (supportView === "agent") scheduleAgentPaneRender();
 	// Agent Work 是中栏 Markdown Surface：退出 Work Surface（仍在「工作」标签）
 	workSurfaceActive = false;
 	editor.readOnly = false;
@@ -4153,31 +4185,63 @@ async function submitAgentQuestion(event) {
 	const request = pendingAgentRequest || { originUri: null, originQuote: null };
 	const mode = request.mode === "work" ? "work" : "assist";
 	agentAskDialog.close();
+	await dispatchAgentRequest({
+		mode,
+		instruction,
+		originUri: request.originUri,
+		originQuote: request.originQuote,
+	});
+}
+
+/// thread 底部「继续问……」composer：同 Session 新 Run 的 assist 提问。
+function submitThreadQuestion(event) {
+	event.preventDefault();
+	if (agentBusy || !agentThreadComposerEl) return;
+	const instruction = agentThreadComposerEl.value.trim();
+	if (!instruction) return;
+	agentThreadComposerEl.value = "";
+	void dispatchAgentRequest({
+		mode: "assist",
+		instruction,
+		originUri: currentDocumentUri(),
+		originQuote: captureEditorSelection()?.quote?.trim() || null,
+	});
+}
+
+/// 所有 Agent 提问的公共通路（M4 契约 + M5 thread 绑定）。
+/// session 由这里惰性建立：有 activeSessionId 就继续，没有就新建——
+/// 「＋ 新会话」只是把 activeSessionId 置空，首条提问时才真正落地。
+async function dispatchAgentRequest({
+	mode = "assist",
+	instruction,
+	originUri = null,
+	originQuote = null,
+} = {}) {
+	if (agentBusy) return;
+	const text = String(instruction || "").trim();
+	if (!text) return;
+	const request = {
+		originUri: originUri || null,
+		originQuote: originQuote || null,
+		mode: mode === "work" ? "work" : "assist",
+	};
 	if (!rootPath) {
 		await chooseWorkspace();
 		if (!rootPath) return;
 	}
 	await saveCurrent();
-	const run = makeLocalAgentRun(request, instruction);
+	// M5：每条提问都归属 durable thread；首条提问落地新 session。
+	const sessionId = await ensureAgentSession(text);
+	const run = makeLocalAgentRun(request, text);
+	run.sessionId = sessionId || null;
 	localAgentRuns.unshift(run);
 	activeAgentRunId = run.id;
 	agentBusy = true;
 	agentCancelRequested = false;
 	if (workMode && legacyAgentView) renderAgentWorks();
-	// M4：assist 提交即把右栏切到 Agent Context，回答不离开当前文档。
-	if (mode === "assist") {
-		lastAgentAnswer = {
-			state: "running",
-			runId: run.id,
-			instruction,
-			text: "",
-			originUri: request.originUri || null,
-			originQuote: request.originQuote || null,
-			error: null,
-		};
-		setAnnotateVisible(true);
-		setSupportView("agent");
-	}
+	// M4/M5：提交即把右栏切到 Agent 视图，回答不离开当前文档。
+	setAnnotateVisible(true);
+	setSupportView("agent");
 	saveStateEl.textContent =
 		mode === "work" ? "Agent 工作运行中…" : "Agent 思考中…";
 	saveStateEl.classList.remove("error");
@@ -4190,15 +4254,18 @@ async function submitAgentQuestion(event) {
 		const citationContext = await loadCitationContext();
 		if (agentCancelRequested) throw new Error("Agent 已停止");
 		// M4 契约：instruction 原文独立发送；来源/选区/引用作为结构化
-		// context；mode 决定 backend 是否落地 durable Work。
+		// context；mode 决定 backend 是否落地 durable Work；sessionId
+		// 决定 durable thread 归属。
 		const input = AgentRequest.buildStartInput({
 			mode,
 			runId: run.id,
-			instruction,
+			instruction: text,
 			originUri: request.originUri,
 			originQuote: request.originQuote,
 			citationContext,
 		});
+		input.sessionId = sessionId || null;
+		input.context.referenceUris = [...citationBasket.keys()];
 		const response = await invoke("agent_start", { input });
 		if (!response?.accepted) {
 			const error = new Error("Pi 没有接受 Agent 请求");
@@ -4206,6 +4273,11 @@ async function submitAgentQuestion(event) {
 			throw error;
 		}
 		run.piSessionRef = response.piSessionRef || null;
+		// backend 已落 user turn：立即刷新，thread 里出现提问 + 流式槽
+		if (sessionId && supportView === "agent") {
+			await refreshAgentThread(sessionId);
+			renderAgentPane();
+		}
 		// Cancellation can race with the setup commands inside agent_start.
 		// If the backend accepted after the first abort saw no active run, make
 		// one cleanup attempt now so that no orphaned Pi turn can continue.
@@ -4228,14 +4300,12 @@ async function submitAgentQuestion(event) {
 		}
 		if (agentCancelRequested) throw new Error("Agent 已停止");
 		if (mode === "assist") {
-			// assist：不创建 Work / Agent Work Artifact。回答投影在右栏
-			// Agent Context，由人决定插入正文、保存为笔记或委派成工作；
-			// 运行收据保留 evidence。
-			if (lastAgentAnswer?.runId === run.id) {
-				lastAgentAnswer.state = "done";
-				lastAgentAnswer.text = String(terminal.text || "");
-				if (supportView === "agent") renderAgentContext();
-			}
+			// assist：不创建 Work / Agent Work Artifact。回答由 backend
+			// settle 侧落为 durable message（事件先落库后广播，这里刷新
+			// thread 即可见）；「继续问」由 thread composer 承担。
+			await refreshAgentThread(sessionId);
+			void refreshAgentSessions();
+			renderAgentPane();
 			saveStateEl.textContent = "Agent 回答已生成";
 		} else {
 			const title = run.title;
@@ -4243,7 +4313,7 @@ async function submitAgentQuestion(event) {
 				input: {
 					title,
 					content: agentDocumentContent(terminal.text, title),
-					prompt: instruction,
+					prompt: text,
 					originUri: request.originUri,
 					originQuote: request.originQuote,
 					piSessionRef: terminal.piSessionRef || run.piSessionRef || null,
@@ -4251,7 +4321,10 @@ async function submitAgentQuestion(event) {
 				},
 			});
 			addCompletedAgentWork(document);
+			if (sessionId) await refreshAgentThread(sessionId);
+			void refreshAgentSessions();
 			if (workMode) void loadWorks();
+			renderAgentPane();
 			saveStateEl.textContent = "Agent 工作已完成";
 		}
 		localAgentRuns = localAgentRuns.filter((item) => item.id !== run.id);
@@ -4268,16 +4341,12 @@ async function submitAgentQuestion(event) {
 		}
 		if (workMode && legacyAgentView) renderAgentWorks();
 		if (mode === "work" && workMode) void loadWorks();
-		// assist 失败：右栏 Agent Context 显示失败与证据指引（不落 Work）
-		if (
-			mode === "assist" &&
-			lastAgentAnswer?.runId === run.id &&
-			!agentCancelRequested
-		) {
-			lastAgentAnswer.state = "failed";
-			lastAgentAnswer.error = shortAgentError(error);
-			if (supportView === "agent") renderAgentContext();
+		// thread 保留失败的 turn（流式槽转 failed 投影），历史不丢
+		if (sessionId) {
+			await refreshAgentThread(sessionId);
+			void refreshAgentSessions();
 		}
+		renderAgentPane();
 		markError(
 			agentCancelRequested
 				? "Agent 已停止"
@@ -4294,92 +4363,274 @@ async function submitAgentQuestion(event) {
 }
 
 // ---------------------------------------------------------------------------
-// Agent Context View（M4 assist 结果）：右栏第四个 Context 视图。
-// 复用批注栏的位置与交互范式，但语义独立：批注是 Human-authored durable
-// annotation，Agent 回答挂在当前文档/选区的 Context 上，不落 Work、
-// 不写进 Annotation schema。「继续问」需要 M5 Session 连续性。
+// Agent Pane（M5 Durable Agent Thread）：右栏第四个 Context 视图。
+// 批注|关联|搜索|Agent 的第四项。真值是 durable agent_sessions /
+// agent_messages；这里只做投影：
+//   当前会话（thread 展开 + 继续问 composer）
+//   相关会话（turn 来源命中当前文档，排序置顶）
+//   最近会话（其余）
+// 切换文档只改变排序，永不删除会话。流式回答遵循 Streaming Integrity：
+// chunk 到达即进 buffer，rAF 合并 DOM 更新；settled 只定稿，不重播。
 // ---------------------------------------------------------------------------
 
-function renderAgentContext() {
-	agentStream.replaceChildren();
-	if (!lastAgentAnswer) {
-		const tip = document.createElement("div");
-		tip.className = "related-empty";
-		tip.textContent =
-			"选中字句后「问 Agent」，回答会停在这里，不打断当前文档。";
-		agentStream.appendChild(tip);
-		return;
+async function refreshAgentSessions() {
+	try {
+		agentSessions = (await invoke("agent_session_list")) || [];
+		agentSessionsLoaded = true;
+	} catch (error) {
+		console.warn("读取 Agent 会话失败", error);
 	}
-	const card = document.createElement("article");
-	card.className = "agent-context-card";
-	const label = document.createElement("div");
-	label.className = "agent-context-label";
-	label.textContent =
-		lastAgentAnswer.state === "running"
-			? "Agent 正在针对以下内容回答…"
-			: "针对选中的内容";
-	card.appendChild(label);
-	if (lastAgentAnswer.originQuote) {
-		const quote = document.createElement("blockquote");
-		quote.className = "agent-context-quote";
-		quote.textContent = lastAgentAnswer.originQuote;
-		card.appendChild(quote);
+	return agentSessions;
+}
+
+async function refreshAgentThread(sessionId = activeSessionId) {
+	if (!sessionId) {
+		agentThread = [];
+		return agentThread;
 	}
-	if (lastAgentAnswer.state === "running") {
-		const status = document.createElement("div");
-		status.className = "agent-context-status";
-		status.textContent = "生成中…";
-		card.appendChild(status);
-		const run = localAgentRuns.find(
-			(item) => item.id === lastAgentAnswer.runId,
-		);
-		if (run?.streamText) {
-			const preview = document.createElement("pre");
-			preview.className = "agent-context-preview";
-			preview.textContent = run.streamText.slice(-600);
-			card.appendChild(preview);
+	const token = ++agentThreadToken;
+	try {
+		const messages = (await invoke("agent_session_messages", {
+			sessionId,
+		})) || [];
+		if (token === agentThreadToken) agentThread = messages;
+	} catch (error) {
+		console.warn("读取 Agent 会话内容失败", error);
+		if (token === agentThreadToken) agentThread = [];
+	}
+	return agentThread;
+}
+
+/// 惰性会话解析：有 active 会话就继续；没有就落地新 session
+/// （标题 = 首条提问截断，不再调一次模型）。
+async function ensureAgentSession(instruction) {
+	if (activeSessionId) {
+		try {
+			const existing = await invoke("agent_session_messages", {
+				sessionId: activeSessionId,
+			});
+			if (Array.isArray(existing)) return activeSessionId;
+		} catch {
+			// active session 已不存在（换工作区/被清理）→ 落新会话
 		}
-	} else if (lastAgentAnswer.state === "failed") {
-		const status = document.createElement("div");
-		status.className = "agent-context-status agent-context-error";
-		status.textContent = `回答失败：${lastAgentAnswer.error || "未知错误"}`;
-		card.appendChild(status);
-		const hint = document.createElement("div");
-		hint.className = "agent-context-hint";
-		hint.textContent = "运行收据已保留，可在失败记录里查看证据。";
-		card.appendChild(hint);
-	} else {
-		const body = document.createElement("div");
-		body.className = "agent-context-body";
-		// 复用阅读区渲染管线：renderMarkdown + sanitizeHtml。
-		const doc = sanitizeHtml(
-			renderMarkdown(lastAgentAnswer.text || "（没有返回正文）"),
-		);
-		body.replaceChildren(...doc.body.childNodes);
-		void hydrateLocalPreviewImages(body);
-		card.appendChild(body);
 	}
-	card.appendChild(agentContextActions());
-	// 仅当用户本就接近底部时跟随滚动，避免流式刷新把人拽离正在读的位置。
+	const created = await invoke("agent_session_create", {
+		input: { title: AgentRequest.displayTitle(instruction) },
+	});
+	activeSessionId = created.id;
+	if (agentSessionPrefKey()) {
+		localStorage.setItem(agentSessionPrefKey(), activeSessionId);
+	}
+	await refreshAgentSessions();
+	return activeSessionId;
+}
+
+async function openAgentSession(sessionId) {
+	activeSessionId = sessionId;
+	if (sessionId) {
+		if (agentSessionPrefKey()) {
+			localStorage.setItem(agentSessionPrefKey(), sessionId);
+		}
+		await refreshAgentThread(sessionId);
+	} else {
+		if (agentSessionPrefKey()) {
+			localStorage.removeItem(agentSessionPrefKey());
+		}
+		agentThread = [];
+	}
+	renderAgentPane();
+}
+
+function beginNewAgentSession() {
+	void openAgentSession(null);
+}
+
+function liveRunsForSession(sessionId) {
+	const map = new Map();
+	for (const run of localAgentRuns) {
+		if (run.sessionId && run.sessionId === sessionId) {
+			map.set(run.id, run);
+		}
+	}
+	return map;
+}
+
+function scheduleAgentPaneRender() {
+	// Streaming Integrity：chunk 早已进入 streamText buffer；这里只合并
+	// DOM 更新频率（rAF），不人为延迟内容投递。
+	if (agentPaneRenderTimer) return;
+	agentPaneRenderTimer = requestAnimationFrame(() => {
+		agentPaneRenderTimer = null;
+		if (supportView === "agent") renderAgentPane();
+	});
+}
+
+function renderAgentPane() {
+	// 流式重建频繁：记住用户是否本就读在底部，重建后跟随，避免被拽离。
 	const nearBottom =
 		agentStream.scrollHeight - agentStream.scrollTop - agentStream.clientHeight <
-		40;
-	agentStream.appendChild(card);
+		60;
+	agentStream.replaceChildren();
+	if (!agentSessionsLoaded) {
+		void refreshAgentSessions().then(() => {
+			if (supportView === "agent") renderAgentPane();
+		});
+	}
+	agentStream.appendChild(agentPaneHeader());
+	if (activeSessionId) {
+		agentStream.appendChild(agentThreadSection());
+	} else {
+		const tip = document.createElement("div");
+		tip.className = "related-empty agent-pane-tip";
+		tip.textContent =
+			"选中字句后「问 Agent」，或点右上角「新会话」开始。问答会形成可追溯的线程。";
+		agentStream.appendChild(tip);
+	}
+	const originUri = currentDocumentUri();
+	const { related, recent } = AgentThread.partitionSessions(agentSessions, {
+		originUri,
+		activeSessionId,
+	});
+	agentStream.appendChild(
+		agentSessionListSection("相关会话", related, originUri),
+	);
+	agentStream.appendChild(agentSessionListSection("最近会话", recent, originUri));
 	if (nearBottom) agentStream.scrollTop = agentStream.scrollHeight;
 }
 
-function agentContextActions() {
+function agentPaneHeader() {
+	const head = document.createElement("div");
+	head.className = "agent-pane-head";
+	const label = document.createElement("span");
+	label.className = "agent-pane-title";
+	label.textContent = "Agent";
+	head.appendChild(label);
+	const newSession = document.createElement("button");
+	newSession.type = "button";
+	newSession.className = "text-btn agent-pane-new";
+	newSession.textContent = "＋ 新会话";
+	newSession.title = "下一条提问将开启新的 Agent 会话";
+	newSession.addEventListener("click", beginNewAgentSession);
+	head.appendChild(newSession);
+	return head;
+}
+
+function agentThreadSection() {
+	const section = document.createElement("section");
+	section.className = "agent-thread";
+	const summary = agentSessions.find((item) => item.id === activeSessionId);
+	const head = document.createElement("div");
+	head.className = "agent-thread-head";
+	const title = document.createElement("div");
+	title.className = "agent-thread-title";
+	title.textContent = summary?.title || "当前会话";
+	const meta = document.createElement("div");
+	meta.className = "agent-thread-meta";
+	const liveCount = liveRunsForSession(activeSessionId).size;
+	meta.textContent = liveCount
+		? `${agentThread.length} 条 · 正在生成…`
+		: `${agentThread.length} 条`;
+	head.append(title, meta);
+	section.appendChild(head);
+
+	const turns = AgentThread.buildTurns(
+		agentThread,
+		liveRunsForSession(activeSessionId),
+	);
+	for (const turn of turns) {
+		section.appendChild(agentTurnNode(turn));
+	}
+	if (!turns.length) {
+		const tip = document.createElement("div");
+		tip.className = "agent-context-hint";
+		tip.textContent = "这个会话还没有问答。";
+		section.appendChild(tip);
+	}
+	section.appendChild(agentThreadComposer());
+	return section;
+}
+
+function agentTurnNode(turn) {
+	const node = document.createElement("article");
+	node.className = "agent-turn";
+	const userLabel = document.createElement("div");
+	userLabel.className = "agent-turn-label agent-turn-user-label";
+	userLabel.textContent = "你";
+	node.appendChild(userLabel);
+	if (turn.quote) {
+		const quote = document.createElement("blockquote");
+		quote.className = "agent-context-quote";
+		quote.textContent = turn.quote;
+		node.appendChild(quote);
+	}
+	const instruction = document.createElement("div");
+	instruction.className = "agent-turn-instruction";
+	instruction.textContent = turn.instruction;
+	node.appendChild(instruction);
+
+	const answerLabel = document.createElement("div");
+	answerLabel.className = "agent-turn-label agent-turn-answer-label";
+	answerLabel.textContent = "Agent";
+	node.appendChild(answerLabel);
+	if (!turn.answer) {
+		return node;
+	}
+	if (turn.answer.state === "streaming") {
+		const status = document.createElement("div");
+		status.className = "agent-context-status";
+		status.textContent = "生成中…";
+		node.appendChild(status);
+		// 渐进 markdown：内容即时入 buffer，DOM 由 rAF 合并刷新；
+		// settled 后用权威全文定稿，不重新播放。
+		if (turn.answer.content) {
+			node.appendChild(agentAnswerBody(turn.answer.content));
+		}
+		return node;
+	}
+	if (turn.answer.state === "failed") {
+		const status = document.createElement("div");
+		status.className = "agent-context-status agent-context-error";
+		status.textContent = `回答失败：${turn.answer.error || turn.answer.status || "未知错误"}`;
+		node.appendChild(status);
+		const hint = document.createElement("div");
+		hint.className = "agent-context-hint";
+		hint.textContent = "运行收据已保留，可在失败记录里查看证据。";
+		node.appendChild(hint);
+		return node;
+	}
+	if (turn.answer.state === "missing") {
+		const status = document.createElement("div");
+		status.className = "agent-context-status";
+		status.textContent = "这次运行没有返回结果。";
+		node.appendChild(status);
+		return node;
+	}
+	node.appendChild(agentAnswerBody(turn.answer.content));
+	node.appendChild(
+		agentTurnActions({
+			messageId: turn.answerMessageId,
+			instruction: turn.instruction,
+			originUri: turn.originUri,
+			quote: turn.quote,
+			content: turn.answer.content,
+		}),
+	);
+	return node;
+}
+
+/// 回答正文：复用阅读区渲染管线（renderMarkdown + sanitizeHtml）。
+function agentAnswerBody(text) {
+	const body = document.createElement("div");
+	body.className = "agent-context-body";
+	const doc = sanitizeHtml(renderMarkdown(text || "（没有返回正文）"));
+	body.replaceChildren(...doc.body.childNodes);
+	void hydrateLocalPreviewImages(body);
+	return body;
+}
+
+function agentTurnActions({ messageId, instruction, originUri, quote, content }) {
 	const actions = document.createElement("div");
 	actions.className = "agent-context-actions";
-	if (lastAgentAnswer.state === "running") return actions;
-	const done = lastAgentAnswer.state === "done";
-	const continueAsk = document.createElement("button");
-	continueAsk.type = "button";
-	continueAsk.className = "text-btn agent-context-action";
-	continueAsk.textContent = "继续问";
-	continueAsk.disabled = true; // M5 Session 连续性后开放
-	continueAsk.title = "Session 连续性（M5）后可用";
-	actions.appendChild(continueAsk);
 	const insert = document.createElement("button");
 	insert.type = "button";
 	insert.className = "text-btn agent-context-action";
@@ -4389,7 +4640,9 @@ function agentContextActions() {
 	insert.title = canInsert
 		? "把回答插入当前文档光标处"
 		: "需要先打开一个可编辑的 Workspace 文档";
-	insert.addEventListener("click", insertAgentAnswerIntoDocument);
+	insert.addEventListener("click", () =>
+		insertAgentAnswerIntoDocument({ messageId, content, originUri }),
+	);
 	actions.appendChild(insert);
 	const save = document.createElement("button");
 	save.type = "button";
@@ -4397,58 +4650,136 @@ function agentContextActions() {
 	save.textContent = "保存为笔记";
 	save.disabled = !rootPath;
 	save.title = "把回答存为 Workspace Markdown 文档";
-	save.addEventListener("click", () => void saveAgentAnswerAsNote());
+	save.addEventListener("click", () =>
+		void saveAgentAnswerAsNote({ messageId, instruction, content }),
+	);
 	actions.appendChild(save);
 	const delegate = document.createElement("button");
 	delegate.type = "button";
 	delegate.className = "text-btn agent-context-action";
 	delegate.textContent = "委派成工作";
-	delegate.disabled = !done;
-	delegate.title = done
-		? "以这条提问的原始要求发起显式委派（创建 Work）"
-		: "回答生成完成后可用";
-	delegate.addEventListener("click", delegateAgentAnswerToWork);
+	delegate.title = "以这条提问的原始要求发起显式委派（创建 Work）";
+	delegate.addEventListener("click", () =>
+		openAgentAskComposer({ mode: "work", originUri, originQuote: quote, prefill: instruction }),
+	);
 	actions.appendChild(delegate);
 	return actions;
 }
 
-// 流式回答期间节流重渲染，避免 message_update 高频重建 DOM。
-function scheduleAgentContextRender() {
-	if (agentContextRenderTimer) return;
-	agentContextRenderTimer = setTimeout(() => {
-		agentContextRenderTimer = null;
-		if (supportView === "agent") renderAgentContext();
-	}, 250);
+/// thread 底部的轻量继续问入口：same Session + new Run，不是聊天框。
+function agentThreadComposer() {
+	const composer = document.createElement("div");
+	composer.className = "agent-thread-composer";
+	const input = document.createElement("textarea");
+	input.rows = 1;
+	input.spellcheck = true;
+	input.placeholder = agentBusy ? "Agent 运行中…" : "继续问……";
+	input.value = agentThreadComposerEl?.value || "";
+	input.disabled = agentBusy;
+	input.setAttribute("aria-label", "继续问");
+	input.addEventListener("input", () => autosizeThreadComposer(input));
+	input.addEventListener("keydown", (event) => {
+		if (event.key === "Enter" && !event.shiftKey) {
+			event.preventDefault();
+			submitThreadQuestion(new Event("submit"));
+		}
+	});
+	agentThreadComposerEl = input;
+	const send = document.createElement("button");
+	send.type = "button";
+	send.className = "text-btn agent-thread-send";
+	send.textContent = "发送";
+	send.disabled = agentBusy;
+	send.addEventListener("click", () =>
+		submitThreadQuestion(new Event("submit")),
+	);
+	composer.append(input, send);
+	return composer;
 }
 
-/// 换文档 / 换工作区时清空 Agent Context：回答锚在当时的文档选区上，
-/// 不跨文档残留（切视图不丢，见 renderAgentContext）。
-function clearAgentContext() {
-	lastAgentAnswer = null;
-	if (supportView === "agent") setSupportView("annotation");
+function autosizeThreadComposer(input) {
+	input.style.height = "auto";
+	input.style.height = `${Math.min(120, Math.max(30, input.scrollHeight))}px`;
+}
+
+function agentSessionListSection(title, sessions, originUri) {
+	const section = document.createElement("section");
+	section.className = "agent-session-group";
+	const head = document.createElement("div");
+	head.className = "agent-session-group-title";
+	head.textContent = sessions.length ? title : "";
+	section.appendChild(head);
+	for (const summary of sessions) {
+		section.appendChild(agentSessionRow(summary, originUri));
+	}
+	return section;
+}
+
+function agentSessionRow(summary, originUri) {
+	const row = document.createElement("button");
+	row.type = "button";
+	row.className = "agent-session-row";
+	const live = liveRunsForSession(summary.id).size > 0;
+	const related =
+		originUri && summary.lastOriginUri === originUri ? true : false;
+	row.classList.toggle("live", live);
+	const title = document.createElement("span");
+	title.className = "agent-session-row-title";
+	title.textContent = summary.title;
+	const meta = document.createElement("span");
+	meta.className = "agent-session-row-meta";
+	meta.textContent = live
+		? "正在生成…"
+		: `${AgentThread.sessionRowMeta(summary)}${related ? " · 本文档" : ""}`;
+	row.title = live ? "会话正在生成回答" : "展开这个会话";
+	row.append(title, meta);
+	row.addEventListener("click", () => void openAgentSession(summary.id));
+	return row;
+}
+
+// ---------------------------------------------------------------------------
+// Agent 结果处置（M5.5 outcome lineage）：每个动作都尽量落一条
+// agentmsg:// → target 的 relation，形成认知发展链。
+// ---------------------------------------------------------------------------
+
+function linkAgentOutcome(messageId, action, targetUri) {
+	if (!messageId || !targetUri) return;
+	invoke("agent_message_link", {
+		input: { messageId, action, targetUri },
+	}).catch((error) => console.warn("记录 Agent 结果链失败", error));
 }
 
 /// 把回答文本插入当前文档光标/选区处，随后触发常规保存/预览管线。
-function insertAgentAnswerIntoDocument() {
-	if (!lastAgentAnswer || !lastAgentAnswer.text.trim()) return;
-	const text = lastAgentAnswer.text.trim();
-	editor.setRangeText(text, editor.selectionStart, editor.selectionEnd, "end");
+function insertAgentAnswerIntoDocument({ messageId, content, originUri } = {}) {
+	if (!content || !content.trim()) return;
+	editor.setRangeText(content.trim(), editor.selectionStart, editor.selectionEnd, "end");
 	editor.focus();
 	editor.dispatchEvent(new Event("input", { bubbles: true }));
+	// 认知链：这条回答被插入到哪个文档（回答自己的来源文档不重复记录）
+	const targetUri = currentDocumentUri();
+	if (targetUri && targetUri !== originUri) {
+		linkAgentOutcome(messageId, "inserted_into", targetUri);
+	}
 	saveStateEl.textContent = "已插入正文";
 }
 
 /// 回答另存为 Workspace Markdown 文档（人的显式动作，不自动落任何对象）。
-async function saveAgentAnswerAsNote() {
-	if (!lastAgentAnswer || !rootPath) return;
-	const title = agentWorkTitle(lastAgentAnswer.instruction);
+async function saveAgentAnswerAsNote({ messageId, instruction, content } = {}) {
+	if (!content || !rootPath) return;
+	const title = agentWorkTitle(instruction);
 	const suggested = `${title.replace(/[\\/:*?"<>|]/g, "-").slice(0, 40) || "agent-note"}.md`;
 	try {
 		const path = await invoke("create_markdown", { relativePath: suggested });
 		await invoke("write_markdown", {
 			path,
-			content: agentDocumentContent(lastAgentAnswer.text, title),
+			content: agentDocumentContent(content, title),
 		});
+		// 认知链：这条回答派生出了哪个文档
+		linkAgentOutcome(
+			messageId,
+			"derived_into",
+			`workspace://${relativeDocumentPath(path).replaceAll("\\", "/")}`,
+		);
 		await refreshTree();
 		await openFile(path, basename(path));
 		saveStateEl.textContent = "已保存为笔记";
@@ -4456,19 +4787,6 @@ async function saveAgentAnswerAsNote() {
 		console.error(error);
 		markError("保存为笔记失败");
 	}
-}
-
-/// 以本条回答的原始 instruction + 同一上下文发起显式委派（mode=work）。
-/// Session 连续性属于 M5；此处委派按当前上下文开新请求。
-function delegateAgentAnswerToWork() {
-	if (!lastAgentAnswer) return;
-	const { instruction, originUri, originQuote } = lastAgentAnswer;
-	openAgentAskComposer({
-		mode: "work",
-		originUri,
-		originQuote,
-		prefill: instruction,
-	});
 }
 
 async function beginAnnotation(range = null) {

@@ -38,7 +38,7 @@ pub struct Migration {
 }
 
 /// 当前 schema 版本；测试可以据此构造“旧版本数据库再增量迁移”的场景。
-pub const LATEST_SCHEMA_VERSION: i64 = 5;
+pub const LATEST_SCHEMA_VERSION: i64 = 6;
 
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -198,6 +198,46 @@ pub const MIGRATIONS: &[Migration] = &[
 
         CREATE INDEX idx_recent_locations_opened
             ON recent_locations(opened_at DESC, id DESC);
+        "#,
+    },
+    Migration {
+        version: 6,
+        // M5 Durable Agent Thread：Session = 连续性对象，Message = 认知线上的
+        // 最小事实。不复制 provider 全量 transcript 结构（session_ref 仍指向
+        // Pi），只保存 StillWrite 自己需要的 thread 投影与 turn 证据。
+        name: "agent_threads",
+        sql: r#"
+        CREATE TABLE agent_sessions (
+            id                   TEXT PRIMARY KEY,
+            workspace_id         TEXT,
+            title                TEXT NOT NULL,
+            provider             TEXT,
+            provider_session_ref TEXT,
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL
+        );
+        CREATE INDEX idx_agent_sessions_workspace
+            ON agent_sessions(workspace_id, updated_at DESC);
+
+        CREATE TABLE agent_messages (
+            id             TEXT PRIMARY KEY,
+            session_id     TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+            role           TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+            content        TEXT NOT NULL,
+            run_ref        TEXT,
+            origin_uri     TEXT,
+            quote_snapshot TEXT,
+            context_set_id INTEGER REFERENCES context_sets(id),
+            created_at     TEXT NOT NULL
+        );
+        CREATE INDEX idx_agent_messages_session
+            ON agent_messages(session_id, created_at, id);
+        -- 相关会话反查：同一来源文档（workspace:///library://...）的 turn
+        CREATE INDEX idx_agent_messages_origin ON agent_messages(origin_uri);
+        -- settle 侧由 run_ref 找回会话；一次 run 的最终回答至多落一条
+        -- （user / assistant 两条 message 共享同一 run_ref，幂等约束只针对 assistant）
+        CREATE UNIQUE INDEX idx_agent_messages_run_assistant
+            ON agent_messages(run_ref) WHERE run_ref IS NOT NULL AND role = 'assistant';
         "#,
     },
 ];
@@ -386,6 +426,16 @@ impl ObjectUri {
         ObjectUri(format!("work://{work_id}"))
     }
 
+    /// Agent Session（M5）：`agentsession://<session-id>`。
+    pub fn agent_session(session_id: &str) -> Self {
+        ObjectUri(format!("agentsession://{session_id}"))
+    }
+
+    /// Agent Message（M5）：`agentmsg://<message-id>`。
+    pub fn agent_message(message_id: &str) -> Self {
+        ObjectUri(format!("agentmsg://{message_id}"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -421,6 +471,9 @@ pub mod event_action {
     pub const WORK_CREATED: &str = "work.created";
     pub const WORK_STATUS_CHANGED: &str = "work.status_changed";
     pub const WORK_UPDATED: &str = "work.updated";
+    // M5 Durable Agent Thread
+    pub const AGENT_SESSION_CREATED: &str = "agent_session.created";
+    pub const AGENT_MESSAGE_APPENDED: &str = "agent_message.appended";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
