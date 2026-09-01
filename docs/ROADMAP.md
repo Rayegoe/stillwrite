@@ -369,4 +369,12 @@ merge / push / release / replace active version 保留明确人类边界。
 
 **状态（2026-08，M1 交付）：** A1 + A2 已按上述边界完成——`works`（migration v4）、`work://` URI、三个 Work 语义事件、Pi→Work 状态桥接与无 UI lifecycle 测试全部落地；UI 未做任何修改，未建 Thread/Run/Artifact 表，历史 Agent Work 未迁移。下一步是 M2：在现有 Agent 区用真实 `works` 数据做 Work 视图（需要你 / 进行中 / 最近完成），不引入 mock 卡片。
 
+---
+
+# Immediate Next Work（M3 后，2026-09）
+
+路线以 `stillwrite-final-business-spec-v2.0-m3-continuation` 为准：M3（Workbench Shell）已落地，当前 P0 为 M4 → M5 → M6；M7/M8 必须在真实使用暴露对应问题后才施工（Stop rule）。
+
+**状态（2026-09，M4 交付）：** Interaction Contract Reset 完成——`agent_start` 契约拆为 `mode(assist|work) + instruction + context`，runtime input 由 backend 组装；assist 不再创建 Work（receipt 保留作 evidence）；`Work.intent` 恢复为人的原始 instruction；启动从硬编码 Work Home 改为 Resume Last Human Context（上次 Surface → 最近可用 Workspace 文档 → Work Home）；assist 结果以 Answer Card 呈现（插入正文 / 保存为文档 / 委派成工作）。见 `docs/M4_ACCEPTANCE.md`（L3 真人 gate 待跑）。下一步是 M5：Durable Agent Session（`agent_sessions` 最小索引 + 继续问），不引入 Chat 主界面。
+
 完成 A 系列、证明 Work/Run/Artifact 能在一个窗口中被监督后，再进入 Thread、Memory、Library 推荐、RSS 智能或 Self-Evolution。

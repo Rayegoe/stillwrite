@@ -2106,6 +2106,49 @@ body.margin-fixed .shell[data-mode="reader"] .markdown-body > * {
 	color: var(--muted);
 	font-size: 11px;
 }
+/* M4 Answer Card：assist 回答的展示与处置（插入正文/保存为文档/委派成工作） */
+.agent-answer-dialog {
+	width: min(640px, calc(100vw - 40px));
+}
+.agent-answer-head h3 {
+	margin: 0 0 12px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.agent-answer-body {
+	max-height: min(52vh, 480px);
+	overflow: auto;
+	margin: 0 0 14px;
+	padding: 12px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: rgba(222, 205, 170, 0.1);
+	font-size: 13px;
+	line-height: 1.7;
+}
+.agent-answer-body p {
+	margin: 0 0 10px;
+}
+.agent-answer-body ul,
+.agent-answer-body ol {
+	margin: 0 0 10px;
+	padding-left: 22px;
+}
+.agent-answer-body pre {
+	overflow: auto;
+	padding: 10px;
+	border-radius: 6px;
+	background: rgba(0, 0, 0, 0.05);
+	font-size: 12px;
+}
+.agent-answer-actions {
+	justify-content: flex-start;
+	flex-wrap: wrap;
+}
+.agent-answer-actions .primary-btn {
+	margin-left: auto;
+}
 .settings-key-status {
 	margin: -8px 0 18px;
 	color: var(--muted);

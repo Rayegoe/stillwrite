@@ -59,7 +59,9 @@
 			next.streamText = text;
 			next.preview = compactPreview(text);
 			next.piSessionRef = event.piSessionRef || next.piSessionRef || null;
-			next.status = "已完成";
+			// settled 只代表一次执行产出了结果；不是 Work completed。
+			// 状态语言见 spec 01 §4：Assist Run「生成中 → 结果已生成 / 失败」。
+			next.status = "已生成";
 			next.terminal = true;
 			next.toolStatus = "";
 			return touched(next);

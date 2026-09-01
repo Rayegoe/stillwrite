@@ -19,7 +19,8 @@ test("settlement uses the authoritative final text and becomes terminal", () => 
 	assert.equal(run.streamText, "authoritative");
 	assert.equal(run.finalText, "authoritative");
 	assert.equal(run.piSessionRef, "session.jsonl");
-	assert.equal(run.status, "已完成");
+	// Run settled = 结果已生成，不投影成 Work「已完成」
+	assert.equal(run.status, "已生成");
 	assert.equal(run.terminal, true);
 });
 

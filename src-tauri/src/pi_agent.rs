@@ -123,12 +123,89 @@ struct RpcResponse {
     error: Option<Value>,
 }
 
+/// Agent 请求契约（M4 Interaction Contract Reset）：
+/// `instruction` 是人的原始要求；`context` 是当前文档/选区/引用的
+/// 结构化或已编译输入；`mode` 决定是否落地 durable Work。
+/// 三者不得再拼成一个 `prompt` 领域字段。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStartInput {
     pub run_id: String,
-    pub prompt: String,
-    pub title: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    pub instruction: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub context: Option<AgentRequestContext>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentMode {
+    /// 普通提问：不创建 Work，只留运行收据作为 evidence。
+    Assist,
+    /// 明确委派：创建 durable Work，`Work.intent` = 原始 instruction。
+    Work,
+}
+
+impl AgentMode {
+    /// 未显式声明 mode 的调用方一律按 assist 处理：宁可少建 Work，
+    /// 也不让普通提问悄悄污染 Work Inbox。
+    fn parse(raw: Option<&str>) -> Result<Self, String> {
+        match raw {
+            None | Some("") => Ok(AgentMode::Assist),
+            Some("assist") => Ok(AgentMode::Assist),
+            Some("work") => Ok(AgentMode::Work),
+            Some(other) => Err(format!("未知的 Agent 请求 mode: {other}")),
+        }
+    }
+}
+
+/// 请求上下文（M4 最小集）。引用资料目前仍由 frontend 编译成文本传入；
+/// M7 Context Compiler 落地后 `citation_context` 由 backend 自取。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRequestContext {
+    #[serde(default)]
+    pub origin_uri: Option<String>,
+    #[serde(default)]
+    pub origin_quote: Option<String>,
+    #[serde(default)]
+    pub citation_context: Option<String>,
+}
+
+/// 组装发给 Pi 的 runtime input。它只是执行输入，不是领域意图：
+/// Work intent 只保存 `instruction` 原文。
+fn compose_runtime_message(instruction: &str, context: Option<&AgentRequestContext>) -> String {
+    let empty = AgentRequestContext {
+        origin_uri: None,
+        origin_quote: None,
+        citation_context: None,
+    };
+    let context = context.unwrap_or(&empty);
+    let source = match context.origin_uri.as_deref() {
+        Some(uri) if !uri.trim().is_empty() => uri,
+        _ => "（当前工作没有明确来源文档）",
+    };
+    let selected = match context.origin_quote.as_deref() {
+        Some(quote) if !quote.trim().is_empty() => {
+            format!("> {}", quote.replace('\n', "\n> "))
+        }
+        _ => "（没有选中文本）".to_string(),
+    };
+    let references = match context.citation_context.as_deref() {
+        Some(citation) if !citation.trim().is_empty() => {
+            format!("# Explicit references\n{citation}")
+        }
+        _ => "# Explicit references\n（没有显式引用资料）".to_string(),
+    };
+    [
+        format!("# Current source\n{source}"),
+        format!("# Selected text\n{selected}"),
+        references,
+        format!("# User request\n{instruction}"),
+    ]
+    .join("\n\n")
 }
 
 #[derive(Serialize)]
@@ -1574,34 +1651,37 @@ pub async fn agent_start(
     process: State<'_, PiProcessState>,
     input: AgentStartInput,
 ) -> Result<AgentStartResponse, String> {
-    let prompt = input.prompt.trim().to_string();
-    if prompt.is_empty() {
+    let mode = AgentMode::parse(input.mode.as_deref())?;
+    let instruction = input.instruction.trim().to_string();
+    if instruction.is_empty() {
         return Err("Agent 指令不能为空".into());
     }
     if !valid_identifier(&input.run_id) {
         return Err("Agent run id 格式无效".into());
     }
-    let title = if input.title.trim().is_empty() {
-        "Agent 工作".to_string()
-    } else {
-        input.title.trim().chars().take(120).collect()
+    let title = match input.title.as_deref() {
+        Some(title) if !title.trim().is_empty() => title.trim().chars().take(120).collect(),
+        _ => "Agent 工作".to_string(),
     };
     let run_id = input.run_id;
     let root = workspace_root(&state)?;
-    // Work 桥接第一步：Pi 请求成立即落地 durable Work（queued，receipt_ref=run id）。
-    // 创建失败则整个请求失败——没有 durable 记录的 Agent 请求不允许发生。
-    {
+    // Work 桥接第一步（仅 work 模式）：Pi 请求成立即落地 durable Work
+    // （queued，receipt_ref=run id）。`intent` 是人的原始 instruction；
+    // 拼接后的 runtime input 不再进入领域字段。创建失败则整个请求失败
+    // ——没有 durable 记录的委派不允许发生。
+    if mode == AgentMode::Work {
         let mut conn = crate::open_durable_state(&app)?;
         work::create_work(
             &mut conn,
             work::NewWork {
                 workspace_id: Some(crate::workspace_id_for_root(&root)),
                 title: title.clone(),
-                intent: prompt.clone(),
+                intent: instruction.clone(),
                 receipt_ref: Some(run_id.clone()),
             },
         )?;
     }
+    let message = compose_runtime_message(&instruction, input.context.as_ref());
     let process = PiProcessState::from_store(Arc::clone(&process.store));
     tauri::async_runtime::spawn_blocking(move || {
         // 状态链：STARTING_PI → PI_READY → SESSION_ALLOCATED → PROMPT_SENT，
@@ -1670,7 +1750,7 @@ pub async fn agent_start(
                 settling: false,
             })?;
             let prompt_response = child.request(
-                json!({ "type": "prompt", "message": prompt }),
+                json!({ "type": "prompt", "message": message }),
                 COMMAND_TIMEOUT,
             );
             let prompt_response = match prompt_response {
@@ -1695,14 +1775,17 @@ pub async fn agent_start(
                     "title": title,
                 }),
             );
-            // Pi 接受请求 → Work running（桥接尽力而为，失败只留痕迹不回滚已发出的请求）
-            transition_run_work(
-                &app,
-                &run_id,
-                WorkStatus::Running,
-                ActorKind::Agent,
-                Some("pi accepted"),
-            );
+            // Pi 接受请求 → Work running（仅 work 模式；桥接尽力而为，
+            // 失败只留痕迹不回滚已发出的请求）
+            if mode == AgentMode::Work {
+                transition_run_work(
+                    &app,
+                    &run_id,
+                    WorkStatus::Running,
+                    ActorKind::Agent,
+                    Some("pi accepted"),
+                );
+            }
             Ok(AgentStartResponse {
                 accepted: true,
                 // 不能把 run_id move 进响应：外层失败路径还要用它写收据。
@@ -1723,14 +1806,17 @@ pub async fn agent_start(
                 }
             }
             append_run_receipt(&app, &run_id, Value::Object(fields));
-            // 启动失败 → Work blocked（依赖缺失，可恢复）或 failed（其余致命错误）
-            let message = short_error(error);
-            let status = if start_failure_is_missing_dependency(&message) {
-                WorkStatus::Blocked
-            } else {
-                WorkStatus::Failed
-            };
-            transition_run_work(&app, &run_id, status, ActorKind::Agent, Some(&message));
+            // 启动失败 → Work blocked（依赖缺失，可恢复）或 failed（其余致命错误）。
+            // 仅 work 模式；assist 没有可推进的 durable 对象。
+            if mode == AgentMode::Work {
+                let message = short_error(error);
+                let status = if start_failure_is_missing_dependency(&message) {
+                    WorkStatus::Blocked
+                } else {
+                    WorkStatus::Failed
+                };
+                transition_run_work(&app, &run_id, status, ActorKind::Agent, Some(&message));
+            }
             return Err(format!(
                 "Agent 启动在 {} 阶段失败：{}",
                 stage.label(),
@@ -1923,6 +2009,52 @@ mod tests {
         io::Cursor,
         time::{Instant, SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn mode_parses_assist_work_and_defaults_to_assist() {
+        // M4：显式 assist / work；缺失或空值按 assist（宁可少建 Work）。
+        assert_eq!(AgentMode::parse(None).unwrap(), AgentMode::Assist);
+        assert_eq!(AgentMode::parse(Some("")).unwrap(), AgentMode::Assist);
+        assert_eq!(AgentMode::parse(Some("assist")).unwrap(), AgentMode::Assist);
+        assert_eq!(AgentMode::parse(Some("work")).unwrap(), AgentMode::Work);
+        let error = AgentMode::parse(Some("delegate")).unwrap_err();
+        assert!(error.contains("delegate"));
+    }
+
+    #[test]
+    fn runtime_message_keeps_instruction_verbatim_and_context_in_sections() {
+        let context = AgentRequestContext {
+            origin_uri: Some("workspace:///notes/a.md".into()),
+            origin_quote: Some("第一行\n第二行".into()),
+            citation_context: Some("### 资料 A\n内容".into()),
+        };
+        let message = compose_runtime_message("查证这个判断", Some(&context));
+        assert!(message.contains("# Current source\nworkspace:///notes/a.md"));
+        assert!(message.contains("# Selected text\n> 第一行\n> 第二行"));
+        assert!(message.contains("# Explicit references\n### 资料 A"));
+        // instruction 原文完整出现在 User request 段，且不被 host context 拼接改写
+        assert!(message.ends_with("# User request\n查证这个判断"));
+        assert_eq!(
+            compose_runtime_message("只问一句", None),
+            [
+                "# Current source\n（当前工作没有明确来源文档）",
+                "# Selected text\n（没有选中文本）",
+                "# Explicit references\n（没有显式引用资料）",
+                "# User request\n只问一句",
+            ]
+            .join("\n\n")
+        );
+        // 空白 context 字段退回到占位符，不输出空段
+        let blank = AgentRequestContext {
+            origin_uri: Some("  ".into()),
+            origin_quote: Some("".into()),
+            citation_context: Some("".into()),
+        };
+        let message = compose_runtime_message("问", Some(&blank));
+        assert!(message.contains("# Current source\n（当前工作没有明确来源文档）"));
+        assert!(message.contains("# Selected text\n（没有选中文本）"));
+        assert!(message.contains("# Explicit references\n（没有显式引用资料）"));
+    }
 
     #[test]
     fn start_failure_classification_splits_dependency_from_fatal() {
